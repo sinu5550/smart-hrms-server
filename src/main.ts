@@ -1,11 +1,10 @@
 import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { NestExpressApplication } from "@nestjs/platform-express";
+import { Express } from "express";
 import { AppModule } from "./app.module";
 
-async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
-
+export function configureApp(app: NestExpressApplication) {
   app.set("trust proxy", true);
   app.setGlobalPrefix("api");
 
@@ -37,9 +36,16 @@ async function bootstrap() {
       },
     }),
   );
+}
 
-  const port = process.env.PORT || 3000;
-  await app.listen(port);
-  console.log(`Enterprise HRMS Backend live on port ${port}`);
+// Local server runner
+async function bootstrap() {
+  if (!process.env.VERCEL) {
+    const app = await NestFactory.create<NestExpressApplication>(AppModule);
+    configureApp(app);
+    const port = process.env.PORT || 3000;
+    await app.listen(port);
+    console.log(`Enterprise HRMS Backend live on port ${port}`);
+  }
 }
 bootstrap();
