@@ -2,7 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 const nodemailer = require("nodemailer");
-const { authenticateToken, requireRoles } = require("../middleware");
+const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
 
 function createOrganizationsRouter(prisma) {
   const router = express.Router();
@@ -239,6 +239,83 @@ function createOrganizationsRouter(prisma) {
       });
 
       return res.status(200).json({ organization: updated });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/organizations/networks (Owner/Admin or devices.wifi / devices.view)
+  router.get("/networks", authenticateToken, requirePermissions(prisma, "devices.wifi"), async (req, res, next) => {
+    try {
+      if (!req.user.organizationId) {
+        return res.status(404).json({ message: "No organization associated." });
+      }
+
+      const networks = await prisma.officeNetwork.findMany({
+        where: { organizationId: req.user.organizationId },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return res.status(200).json(networks);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/organizations/networks (Owner/Admin or devices.wifi)
+  router.post("/networks", authenticateToken, requirePermissions(prisma, "devices.wifi"), async (req, res, next) => {
+    try {
+      const { locationName, allowedPublicIp, subnetMask } = req.body || {};
+      const organizationId = req.user.organizationId;
+
+      if (!organizationId) {
+        return res.status(403).json({ message: "Organization workspace required." });
+      }
+      if (!allowedPublicIp || !allowedPublicIp.trim()) {
+        return res.status(400).json({ message: "Allowed Wi-Fi IP address is required." });
+      }
+
+      const cleanIp = allowedPublicIp.trim();
+      const existing = await prisma.officeNetwork.findFirst({
+        where: { organizationId, allowedPublicIp: cleanIp },
+      });
+
+      if (existing) {
+        return res.status(400).json({ message: `Wi-Fi IP ${cleanIp} is already registered.` });
+      }
+
+      const network = await prisma.officeNetwork.create({
+        data: {
+          organizationId,
+          locationName: (locationName || "Office HQ Wi-Fi").trim(),
+          allowedPublicIp: cleanIp,
+          subnetMask: subnetMask ? subnetMask.trim() : null,
+          isActive: true,
+        },
+      });
+
+      return res.status(201).json(network);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // DELETE /api/organizations/networks/:id (Owner/Admin or devices.wifi)
+  router.delete("/networks/:id", authenticateToken, requirePermissions(prisma, "devices.wifi"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const network = await prisma.officeNetwork.findFirst({
+        where: { id, organizationId },
+      });
+
+      if (!network) {
+        return res.status(404).json({ message: "Network entry not found." });
+      }
+
+      await prisma.officeNetwork.delete({ where: { id } });
+      return res.status(200).json({ success: true, message: "Office Wi-Fi IP rule removed." });
     } catch (err) {
       next(err);
     }

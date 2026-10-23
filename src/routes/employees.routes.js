@@ -318,6 +318,54 @@ function createEmployeesRouter(prisma) {
       const dto = req.body || {};
       const organizationId = req.user.organizationId;
 
+      // Permission checks for non-ADMIN users:
+      if (req.user.role !== "ADMIN" && req.user.role !== "PLATFORM_ADMIN") {
+        const caller = await prisma.user.findUnique({
+          where: { id: req.user.userId },
+          select: {
+            role: true,
+            permissions: true,
+            customRole: { select: { permissions: true } },
+            organization: { select: { ownerEmail: true } },
+          },
+        });
+
+        const isCallerOwner = Boolean(
+          caller?.organization?.ownerEmail &&
+          caller.organization.ownerEmail.toLowerCase() === req.user.email.toLowerCase()
+        );
+
+        if (!isCallerOwner) {
+          const directPerms = Array.isArray(caller?.permissions) ? caller.permissions : [];
+          const rolePerms = Array.isArray(caller?.customRole?.permissions) ? caller.customRole.permissions : [];
+          const callerPerms = Array.from(new Set([...directPerms, ...rolePerms]));
+
+          // If updating role:
+          if (dto.role && dto.role !== undefined && !callerPerms.includes("employees.roles")) {
+            return res.status(403).json({
+              message: "Access denied: You do not possess the 'employees.roles' privilege to change employee roles.",
+            });
+          }
+
+          // If updating permissions or customRoleId:
+          if (
+            (dto.permissions !== undefined || dto.customRoleId !== undefined) &&
+            !callerPerms.includes("employees.permissions")
+          ) {
+            return res.status(403).json({
+              message: "Access denied: You do not possess the 'employees.permissions' privilege to grant or modify permissions.",
+            });
+          }
+
+          // General profile editing:
+          if (!callerPerms.includes("employees.edit") && !callerPerms.includes("employees.permissions") && !callerPerms.includes("employees.roles")) {
+            return res.status(403).json({
+              message: "Access denied: You do not possess the 'employees.edit' privilege to update personnel.",
+            });
+          }
+        }
+      }
+
       const user = await prisma.user.findFirst({ where: { id, organizationId } });
       if (!user || user.isDeleted) {
         return res.status(404).json({ message: "Employee not found or already deleted." });
@@ -360,7 +408,7 @@ function createEmployeesRouter(prisma) {
       }
 
       let permissionsData = {};
-      if (dto.permissions) {
+      if (Array.isArray(dto.permissions)) {
         permissionsData = { permissions: dto.permissions };
       } else if (dto.customRoleId && dto.customRoleId !== user.customRoleId) {
         const roleRecord = await prisma.customRole.findUnique({ where: { id: dto.customRoleId } });
@@ -551,6 +599,73 @@ function createEmployeesRouter(prisma) {
       });
 
       return res.status(200).json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/employees/bulk-import (HR, ADMIN)
+  router.post("/bulk-import", async (req, res, next) => {
+    try {
+      const { rows } = req.body || {};
+      const organizationId = req.user.organizationId;
+
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return res.status(400).json({ message: "No employee rows provided for import." });
+      }
+
+      const defaultPassword = await bcrypt.hash("Employee@123", 10);
+      const imported = [];
+      const skipped = [];
+
+      for (const row of rows) {
+        const email = (row.email || "").trim().toLowerCase();
+        const fullName = (row.fullName || "").trim();
+        const employeeId = (row.employeeId || "").trim();
+
+        if (!email || !fullName || !employeeId) {
+          skipped.push({ row, reason: "Missing required fullName, employeeId, or email." });
+          continue;
+        }
+
+        const existing = await prisma.user.findFirst({
+          where: {
+            organizationId,
+            OR: [{ email }, { employeeId }],
+          },
+        });
+
+        if (existing) {
+          skipped.push({ row, reason: "Email or Employee ID already exists." });
+          continue;
+        }
+
+        const user = await prisma.user.create({
+          data: {
+            organizationId,
+            fullName,
+            employeeId,
+            email,
+            phone: row.phone ? String(row.phone).trim() : null,
+            role: row.role === "HR" ? "HR" : "EMPLOYEE",
+            bloodGroup: row.bloodGroup || null,
+            departmentId: row.departmentId || null,
+            passwordHash: defaultPassword,
+            mustChangePassword: true,
+          },
+          select: { id: true, employeeId: true, fullName: true, email: true },
+        });
+
+        imported.push(user);
+      }
+
+      return res.status(200).json({
+        success: true,
+        totalImported: imported.length,
+        totalSkipped: skipped.length,
+        imported,
+        skipped,
+      });
     } catch (err) {
       next(err);
     }

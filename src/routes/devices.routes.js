@@ -1,11 +1,75 @@
 const express = require("express");
-const { authenticateToken, requireRoles } = require("../middleware");
+const crypto = require("crypto");
+const QRCode = require("qrcode");
+const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
 
 function createDevicesRouter(prisma) {
   const router = express.Router();
 
-  // GET /api/devices (Admin, HR)
-  router.get("/", authenticateToken, requireRoles("ADMIN", "HR"), async (req, res, next) => {
+  // Helper to compute a secure HMAC QR payload for an organization
+  function computeTenantQrPayload(organizationId, organizationSlug, allowedPublicIp) {
+    const secret = process.env.JWT_SECRET || "hrms_secret";
+    // We bind the QR payload to tenant organizationId, slug, and optional office public IP
+    const rawData = `tenant:${organizationId}:slug:${organizationSlug || ""}:ip:${allowedPublicIp || "any"}`;
+    const signature = crypto.createHmac("sha256", secret).update(rawData).digest("hex");
+    return JSON.stringify({
+      type: "OFFICE_ATTENDANCE_QR",
+      orgId: organizationId,
+      slug: organizationSlug,
+      officeIp: allowedPublicIp || null,
+      sig: signature,
+      timestamp: Date.now(),
+    });
+  }
+
+  // GET /api/devices/qr-code (Admin, HR with devices.qr or devices.view)
+  router.get("/qr-code", authenticateToken, requirePermissions(prisma, "devices.qr"), async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const org = await prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { id: true, name: true, slug: true, employeePrefix: true, logoUrl: true },
+      });
+
+      if (!org) {
+        return res.status(404).json({ message: "Organization not found." });
+      }
+
+      // Check configured office networks
+      const networks = await prisma.officeNetwork.findMany({
+        where: { organizationId, isActive: true },
+        select: { id: true, locationName: true, allowedPublicIp: true },
+      });
+
+      const primaryIp = networks.length > 0 ? networks[0].allowedPublicIp : "127.0.0.1";
+      const qrPayload = computeTenantQrPayload(org.id, org.slug, primaryIp);
+
+      // Generate Data URL PNG
+      const qrDataUrl = await QRCode.toDataURL(qrPayload, {
+        errorCorrectionLevel: "H",
+        margin: 2,
+        width: 400,
+        color: {
+          dark: "#064e3b", // Emerald dark
+          light: "#ffffff",
+        },
+      });
+
+      return res.status(200).json({
+        organization: org,
+        officeNetworks: networks,
+        primaryIp,
+        qrPayload,
+        qrDataUrl,
+        staticOfficeSecret: process.env.OFFICE_QR_SECRET || "super_secure_office_static_token_2026",
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/devices (Admin, HR with devices.view)
+  router.get("/", authenticateToken, requirePermissions(prisma, "devices.view"), async (req, res, next) => {
     try {
       const devices = await prisma.biometricDevice.findMany({
         where: { organizationId: req.user.organizationId },
@@ -17,8 +81,8 @@ function createDevicesRouter(prisma) {
     }
   });
 
-  // POST /api/devices (Admin)
-  router.post("/", authenticateToken, requireRoles("ADMIN"), async (req, res, next) => {
+  // POST /api/devices (Admin, HR with devices.manage)
+  router.post("/", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
     try {
       const dto = req.body || {};
       const organizationId = req.user.organizationId;
@@ -52,8 +116,8 @@ function createDevicesRouter(prisma) {
     }
   });
 
-  // DELETE /api/devices/:id (Admin)
-  router.delete("/:id", authenticateToken, requireRoles("ADMIN"), async (req, res, next) => {
+  // DELETE /api/devices/:id (Admin, HR with devices.manage)
+  router.delete("/:id", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
     try {
       const { id } = req.params;
       const organizationId = req.user.organizationId;
@@ -72,8 +136,8 @@ function createDevicesRouter(prisma) {
     }
   });
 
-  // GET /api/devices/logs (Admin, HR)
-  router.get("/logs", authenticateToken, requireRoles("ADMIN", "HR"), async (req, res, next) => {
+  // GET /api/devices/logs (Admin, HR with devices.view)
+  router.get("/logs", authenticateToken, requirePermissions(prisma, "devices.view"), async (req, res, next) => {
     try {
       const logs = await prisma.biometricRawLog.findMany({
         where: { organizationId: req.user.organizationId },
@@ -89,51 +153,94 @@ function createDevicesRouter(prisma) {
     }
   });
 
-  // POST /api/devices/webhook/push-log (Public hardware push webhook)
+  // POST /api/devices/webhook/push-log (Public hardware push webhook for Hikvision & ZKTeco)
   router.post("/webhook/push-log", async (req, res, next) => {
     try {
       const dto = req.body || {};
 
-      // 1. Locate device
+      // 1. Normalize device serial from Hikvision ISAPI XML/JSON or standard payload
+      // Hikvision sends: { eventType, AccessControllerEvent: { deviceNo, subEventType, employeeNoString, ... } }
+      // Or: { deviceSerialNumber, employeeId, punchTime, verificationMode }
+      const serialNumber =
+        dto.deviceSerialNumber ||
+        dto.AccessControllerEvent?.deviceNo ||
+        dto.AccessControllerEvent?.serialNo ||
+        dto.serialNo ||
+        dto.macAddress;
+
+      const employeeId =
+        dto.employeeId ||
+        dto.AccessControllerEvent?.employeeNoString ||
+        dto.AccessControllerEvent?.cardNo ||
+        dto.cardNo;
+
+      let punchTime = dto.punchTime || dto.AccessControllerEvent?.time || dto.dateTime;
+      punchTime = punchTime ? new Date(punchTime) : new Date();
+
+      // Determine verification method (Hikvision subEventType or verificationMode)
+      let verificationMode = dto.verificationMode || "FINGERPRINT";
+      if (dto.AccessControllerEvent) {
+        const subType = Number(dto.AccessControllerEvent?.subEventType || 0);
+        // In Hikvision: 75=Face match passed, 38=Fingerprint match passed, 1=Card swipe
+        if (subType === 75 || dto.AccessControllerEvent?.faceLib) {
+          verificationMode = "FACE_SCAN";
+        } else if (subType === 38 || dto.AccessControllerEvent?.fingerPrint) {
+          verificationMode = "FINGERPRINT";
+        } else {
+          verificationMode = "HIKVISION_BIOMETRIC";
+        }
+      }
+
+      if (!serialNumber || !employeeId) {
+        return res.status(400).json({
+          message: "Missing deviceSerialNumber or employee identifier in webhook payload.",
+        });
+      }
+
+      // 2. Locate device
       const device = await prisma.biometricDevice.findFirst({
-        where: { deviceSerialNumber: dto.deviceSerialNumber },
+        where: { deviceSerialNumber: String(serialNumber).trim() },
       });
 
       if (!device || !device.organizationId) {
         return res.status(404).json({
-          message: `Unregistered hardware device serial: ${dto.deviceSerialNumber}`,
+          message: `Unregistered hardware device serial: ${serialNumber}`,
         });
       }
 
-      // 2. Find user in the same organization
+      // 3. Find user in the same organization (by employeeId or national ID/card)
+      const cleanEmpId = String(employeeId).trim();
       const user = await prisma.user.findFirst({
         where: {
           organizationId: device.organizationId,
-          employeeId: dto.employeeId,
+          OR: [
+            { employeeId: cleanEmpId },
+            { employeeId: { endsWith: cleanEmpId } },
+          ],
         },
       });
 
       if (!user) {
         return res.status(404).json({
-          message: `Employee ID "${dto.employeeId}" not found in workspace.`,
+          message: `Employee ID "${cleanEmpId}" not found in workspace organization.`,
         });
       }
 
-      const punchDate = new Date(dto.punchTime);
+      const punchDate = punchTime;
       const utcMidnightToday = new Date(
         Date.UTC(punchDate.getUTCFullYear(), punchDate.getUTCMonth(), punchDate.getUTCDate())
       );
 
-      // 3. Record raw punch
+      // 4. Record raw punch
       await prisma.biometricRawLog.create({
         data: {
           organizationId: device.organizationId,
           deviceId: device.id,
-          deviceSerialNumber: dto.deviceSerialNumber,
-          employeeId: dto.employeeId,
+          deviceSerialNumber: String(serialNumber).trim(),
+          employeeId: user.employeeId,
           punchTime: punchDate,
           punchType: dto.punchType || "CHECK_IN",
-          verificationMode: dto.verificationMode || "FINGERPRINT",
+          verificationMode,
           syncStatus: "PROCESSED",
         },
       });

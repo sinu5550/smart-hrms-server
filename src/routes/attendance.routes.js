@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const { authenticateToken, requireRoles, officeIpGuard, resolveClientIp } = require("../middleware");
 
 function createAttendanceRouter(prisma) {
@@ -79,9 +80,40 @@ function createAttendanceRouter(prisma) {
     async (req, res, next) => {
       try {
         const dto = req.body || {};
-        const validQrSecret = process.env.OFFICE_QR_SECRET;
-        if (dto.qrSecret !== validQrSecret) {
-          return res.status(403).json({ message: "Invalid or expired office QR code signature." });
+        const incomingSecret = (dto.qrSecret || "").trim();
+        const validStaticSecret = process.env.OFFICE_QR_SECRET;
+
+        let isQrValid = false;
+
+        // 1. Check if it's the static office token
+        if (incomingSecret && incomingSecret === validStaticSecret) {
+          isQrValid = true;
+        }
+
+        // 2. Check if it's a dynamic JSON tenant QR code
+        if (!isQrValid && incomingSecret) {
+          try {
+            const parsed = JSON.parse(incomingSecret);
+            if (parsed && parsed.type === "OFFICE_ATTENDANCE_QR") {
+              // Ensure this QR belongs to the user's organization
+              if (parsed.orgId && parsed.orgId === req.user.organizationId) {
+                const secret = process.env.JWT_SECRET || "hrms_secret";
+                const rawData = `tenant:${parsed.orgId}:slug:${parsed.slug || ""}:ip:${parsed.officeIp || "any"}`;
+                const expectedSig = crypto.createHmac("sha256", secret).update(rawData).digest("hex");
+                if (expectedSig === parsed.sig) {
+                  isQrValid = true;
+                }
+              }
+            }
+          } catch {
+            // Not a JSON string, fallback checked above
+          }
+        }
+
+        if (!isQrValid) {
+          return res.status(403).json({
+            message: "Invalid or expired office QR code signature. Ensure you are scanning your organization's designated QR code.",
+          });
         }
 
         const today = getUtcMidnightToday();

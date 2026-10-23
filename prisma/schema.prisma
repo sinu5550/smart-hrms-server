@@ -414,6 +414,10 @@ model Organization {
   jobGrades             JobGrade[]
   gazetteRules          GazetteRule[]
   idCardTemplates       IdCardTemplate[]
+  jobPostings           JobPosting[]
+  disciplinaryActions   DisciplinaryAction[]
+  trainingPrograms      TrainingProgram[]
+  kpiAppraisals         KpiAppraisal[]
 
   @@index([emailDomain])
   @@index([status])
@@ -685,4 +689,95 @@ model Verification {
   updatedAt  DateTime? @updatedAt @map("updated_at")
 
   @@map("verifications")
+}
+
+model JobPosting {
+  id             String      @id @default(uuid()) @db.Uuid
+  organizationId String?     @map("organization_id") @db.Uuid
+  title          String
+  department     String?
+  location       String?     @default("Headquarters")
+  employmentType String?     @default("FULL_TIME") @map("employment_type")
+  experience     String?     @default("1-3 Years")
+  description    String      @db.Text
+  requirements   String?     @db.Text
+  status         String?     @default("PUBLISHED")
+  candidates     Candidate[]
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("job_postings")
+}
+
+model Candidate {
+  id           String      @id @default(uuid()) @db.Uuid
+  jobId        String      @map("job_id") @db.Uuid
+  fullName     String      @map("full_name")
+  email        String
+  phone        String?
+  resumeUrl    String?     @map("resume_url")
+  stage        String?     @default("APPLIED") // APPLIED, SCREENING, INTERVIEW, OFFER, HIRED, REJECTED
+  rating       Int?        @default(3)
+  notes        String?     @db.Text
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  job          JobPosting  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@map("candidates")
+}
+
+model DisciplinaryAction {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String?   @map("organization_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  actionType     String    @map("action_type") // SHOW_CAUSE, VERBAL_WARNING, WRITTEN_WARNING, SUSPENSION, TERMINATION
+  title          String
+  description    String    @db.Text
+  actionDate     DateTime  @default(now()) @map("action_date")
+  issuedBy       String?   @map("issued_by") @db.Uuid
+  status         String?   @default("ACTIVE")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("disciplinary_actions")
+}
+
+model TrainingProgram {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String?   @map("organization_id") @db.Uuid
+  title          String
+  trainerName    String?   @map("trainer_name")
+  startDate      DateTime  @map("start_date")
+  endDate        DateTime  @map("end_date")
+  location       String?   @default("HQ Training Hall")
+  description    String?   @db.Text
+  status         String?   @default("SCHEDULED")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("training_programs")
+}
+
+model KpiAppraisal {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String?   @map("organization_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  cycleYear      Int       @default(2026) @map("cycle_year")
+  cycleQuarter   String?   @default("Q1") @map("cycle_quarter")
+  metricTitle    String    @map("metric_title")
+  targetScore    Float     @default(100) @map("target_score")
+  achievedScore  Float     @default(80) @map("achieved_score")
+  rating         Float?    @default(4.0)
+  feedback       String?   @db.Text
+  status         String?   @default("COMPLETED")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("kpi_appraisals")
 }

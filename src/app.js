@@ -12,6 +12,8 @@ const { createRolesRouter } = require("./routes/roles.routes");
 const { createSettingsRouter } = require("./routes/settings.routes");
 const { createDevicesRouter } = require("./routes/devices.routes");
 const { createCoreHrRouter } = require("./routes/core-hr.routes");
+const { createOutworkRouter } = require("./routes/outwork.routes");
+const { createLoansRouter } = require("./routes/loans.routes");
 
 const app = express();
 
@@ -82,6 +84,8 @@ apiRouter.use("/roles", createRolesRouter(prisma));
 apiRouter.use("/shifts", createSettingsRouter(prisma));
 apiRouter.use("/devices", createDevicesRouter(prisma));
 apiRouter.use("/core-hr", createCoreHrRouter(prisma));
+apiRouter.use("/outwork", createOutworkRouter(prisma));
+apiRouter.use("/loans", createLoansRouter(prisma));
 
 app.use("/api", apiRouter);
 

@@ -33,8 +33,17 @@ function createAuthRouter(prisma) {
     if (organizationId) {
       organizationData = await prisma.organization.findUnique({
         where: { id: organizationId },
-        select: { id: true, name: true, slug: true, logoUrl: true, employeePrefix: true },
+        select: { id: true, name: true, slug: true, logoUrl: true, employeePrefix: true, ownerEmail: true },
       });
+    }
+
+    // Merge direct permissions and customRole permissions
+    let activePermissions = Array.isArray(user.permissions) ? user.permissions : [];
+    if (user.customRoleId) {
+      const cr = await prisma.customRole.findUnique({ where: { id: user.customRoleId }, select: { permissions: true } });
+      if (cr && Array.isArray(cr.permissions)) {
+        activePermissions = Array.from(new Set([...activePermissions, ...cr.permissions]));
+      }
     }
 
     return {
@@ -50,6 +59,8 @@ function createAuthRouter(prisma) {
         role: user.role,
         status: user.status,
         avatarUrl: user.avatarUrl,
+        permissions: activePermissions,
+        customRoleId: user.customRoleId,
         organization: organizationData,
       },
     };
@@ -270,7 +281,7 @@ function createAuthRouter(prisma) {
         select: {
           id: true,
           organizationId: true,
-          organization: { select: { id: true, name: true, slug: true, logoUrl: true, employeePrefix: true } },
+          organization: { select: { id: true, name: true, slug: true, logoUrl: true, employeePrefix: true, ownerEmail: true } },
           employeeId: true,
           email: true,
           fullName: true,
@@ -280,6 +291,8 @@ function createAuthRouter(prisma) {
           bloodGroup: true,
           avatarUrl: true,
           permissions: true,
+          customRoleId: true,
+          customRole: { select: { id: true, name: true, permissions: true } },
           mustChangePassword: true,
           joiningDate: true,
           department: { select: { id: true, name: true } },
@@ -291,7 +304,15 @@ function createAuthRouter(prisma) {
         return res.status(401).json({ message: "User profile not found." });
       }
 
-      return res.status(200).json(user);
+      // Merge direct permissions and customRole permissions
+      const directPerms = Array.isArray(user.permissions) ? user.permissions : [];
+      const rolePerms = Array.isArray(user.customRole?.permissions) ? user.customRole.permissions : [];
+      const mergedPermissions = Array.from(new Set([...directPerms, ...rolePerms]));
+
+      return res.status(200).json({
+        ...user,
+        permissions: mergedPermissions,
+      });
     } catch (err) {
       next(err);
     }

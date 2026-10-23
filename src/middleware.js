@@ -48,6 +48,56 @@ function requireRoles(...allowedRoles) {
   };
 }
 
+function requirePermissions(prisma, requiredPermission) {
+  return async (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    // Platform admin and Workspace Admin/Owner always have full privileges
+    if (req.user.role === "PLATFORM_ADMIN" || req.user.role === "ADMIN") {
+      return next();
+    }
+
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.userId },
+        select: {
+          role: true,
+          permissions: true,
+          customRole: { select: { permissions: true } },
+          organization: { select: { ownerEmail: true } },
+        },
+      });
+
+      if (!user) {
+        return res.status(401).json({ message: "User profile not found." });
+      }
+
+      // Check if user is the organization owner
+      if (user.organization?.ownerEmail && user.organization.ownerEmail.toLowerCase() === req.user.email.toLowerCase()) {
+        return next();
+      }
+
+      // Collect user permissions (direct + customRole)
+      const directPermissions = Array.isArray(user.permissions) ? user.permissions : [];
+      const rolePermissions = Array.isArray(user.customRole?.permissions) ? user.customRole.permissions : [];
+      const userPermissions = Array.from(new Set([...directPermissions, ...rolePermissions]));
+
+      if (!userPermissions.includes(requiredPermission)) {
+        return res.status(403).json({
+          message: `Access denied: You do not possess the "${requiredPermission}" privilege.`,
+        });
+      }
+
+      next();
+    } catch (err) {
+      console.error("Permission check error:", err);
+      return res.status(500).json({ message: "Internal authorization error." });
+    }
+  };
+}
+
 async function officeIpGuard(prisma, req, res, next) {
   const organizationId = req.user?.organizationId;
   if (!organizationId) {
@@ -90,5 +140,6 @@ module.exports = {
   resolveClientIp,
   authenticateToken,
   requireRoles,
+  requirePermissions,
   officeIpGuard,
 };

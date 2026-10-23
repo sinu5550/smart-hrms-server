@@ -1,14 +1,13 @@
 const express = require("express");
-const { authenticateToken, requireRoles } = require("../middleware");
+const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
 
 function createRolesRouter(prisma) {
   const router = express.Router();
 
   router.use(authenticateToken);
-  router.use(requireRoles("ADMIN", "HR"));
 
-  // GET /api/roles
-  router.get("/", async (req, res, next) => {
+  // GET /api/roles (viewing roles requires employees.roles or employees.view or ADMIN/HR)
+  router.get("/", requireRoles("ADMIN", "HR", "EMPLOYEE"), async (req, res, next) => {
     try {
       const roles = await prisma.customRole.findMany({
         where: { organizationId: req.user.organizationId },
@@ -45,8 +44,8 @@ function createRolesRouter(prisma) {
     }
   });
 
-  // POST /api/roles
-  router.post("/", async (req, res, next) => {
+  // POST /api/roles (Requires employees.roles)
+  router.post("/", requirePermissions(prisma, "employees.roles"), async (req, res, next) => {
     try {
       const dto = req.body || {};
       const organizationId = req.user.organizationId;
@@ -88,8 +87,8 @@ function createRolesRouter(prisma) {
     }
   });
 
-  // PATCH /api/roles/:id
-  router.patch("/:id", async (req, res, next) => {
+  // PATCH /api/roles/:id (Requires employees.roles)
+  router.patch("/:id", requirePermissions(prisma, "employees.roles"), async (req, res, next) => {
     try {
       const { id } = req.params;
       const dto = req.body || {};
@@ -143,8 +142,8 @@ function createRolesRouter(prisma) {
     }
   });
 
-  // DELETE /api/roles/:id
-  router.delete("/:id", async (req, res, next) => {
+  // DELETE /api/roles/:id (Requires employees.roles)
+  router.delete("/:id", requirePermissions(prisma, "employees.roles"), async (req, res, next) => {
     try {
       const { id } = req.params;
       const organizationId = req.user.organizationId;
