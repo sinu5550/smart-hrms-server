@@ -2,8 +2,9 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { authenticateToken } = require("../middleware");
+const { createAndSendOtp, verifyOtp } = require("../otp.service");
 
-function createAuthRouter(prisma, auth) {
+function createAuthRouter(prisma) {
   const router = express.Router();
 
   async function issueSession(user, organizationId) {
@@ -54,33 +55,23 @@ function createAuthRouter(prisma, auth) {
     };
   }
 
-  // POST /api/auth/send-otp (Better Auth Email OTP helper)
+  // POST /api/auth/send-otp
   router.post("/send-otp", async (req, res, next) => {
     try {
       const { email, type } = req.body || {};
       if (!email) {
-        return res.status(400).json({ message: "Email is required to dispatch an OTP." });
+        return res.status(400).json({ message: "Email address is required." });
       }
 
-      const normalizedEmail = email.trim().toLowerCase();
-      if (auth && auth.api && auth.api.sendVerificationOTP) {
-        await auth.api.sendVerificationOTP({
-          body: {
-            email: normalizedEmail,
-            type: type || "sign-in",
-          },
-        });
-        return res.status(200).json({ success: true, message: `OTP sent to ${normalizedEmail}` });
-      }
-
-      return res.status(200).json({ success: true, message: `OTP generated for ${normalizedEmail}` });
+      await createAndSendOtp(email, type || "sign-in");
+      return res.status(200).json({ success: true, message: `OTP code dispatched to ${email}.` });
     } catch (err) {
-      console.error("Better Auth send-otp error:", err);
+      console.error("send-otp error:", err);
       next(err);
     }
   });
 
-  // POST /api/auth/verify-otp (Verify Better Auth Email OTP)
+  // POST /api/auth/verify-otp
   router.post("/verify-otp", async (req, res, next) => {
     try {
       const { email, otp, type } = req.body || {};
@@ -88,27 +79,13 @@ function createAuthRouter(prisma, auth) {
         return res.status(400).json({ message: "Email and OTP code are required." });
       }
 
-      const normalizedEmail = email.trim().toLowerCase();
-      const code = String(otp).trim();
-
-      const verification = await prisma.verification.findFirst({
-        where: {
-          identifier: normalizedEmail,
-          value: code,
-          expiresAt: { gt: new Date() },
-        },
-      });
-
-      if (!verification) {
-        return res.status(400).json({ message: "Invalid or expired OTP code." });
+      const result = await verifyOtp(email, otp);
+      if (!result.valid) {
+        return res.status(400).json({ message: result.message || "Invalid or expired OTP." });
       }
 
-      // Delete verified record to prevent replay
-      await prisma.verification.delete({ where: { id: verification.id } }).catch(() => null);
-
-      // Check if user exists in HRMS
       const user = await prisma.user.findFirst({
-        where: { email: normalizedEmail, isDeleted: false },
+        where: { email: email.trim().toLowerCase(), isDeleted: false },
         include: { organization: true },
       });
 
@@ -119,7 +96,7 @@ function createAuthRouter(prisma, auth) {
 
       return res.status(200).json({ success: true, verified: true, message: "OTP verified successfully." });
     } catch (err) {
-      console.error("Better Auth verify-otp error:", err);
+      console.error("verify-otp error:", err);
       next(err);
     }
   });

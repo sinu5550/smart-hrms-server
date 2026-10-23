@@ -1,9 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const { toNodeHandler } = require("better-auth/node");
 const { prisma } = require("./prisma");
-const { auth } = require("./auth");
 
 const { createAuthRouter } = require("./routes/auth.routes");
 const { createAttendanceRouter } = require("./routes/attendance.routes");
@@ -46,16 +44,6 @@ app.use(
   })
 );
 
-// Better Auth native routes (/api/auth/*) handler before generic body parsing
-app.use("/api/auth", (req, res, next) => {
-  // Let custom HRMS routes take precedence or fallback to Better Auth
-  const customPaths = ["/login", "/platform-login", "/refresh", "/me", "/change-password", "/send-otp", "/verify-otp"];
-  if (customPaths.includes(req.path)) {
-    return next();
-  }
-  return toNodeHandler(auth)(req, res);
-});
-
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
@@ -85,7 +73,7 @@ app.get("/api/health", (_req, res) => {
 // Mount /api prefixed routes
 const apiRouter = express.Router();
 
-apiRouter.use("/auth", createAuthRouter(prisma, auth));
+apiRouter.use("/auth", createAuthRouter(prisma));
 apiRouter.use("/attendance", createAttendanceRouter(prisma));
 apiRouter.use("/employees", createEmployeesRouter(prisma));
 apiRouter.use("/departments", createDepartmentsRouter(prisma));
