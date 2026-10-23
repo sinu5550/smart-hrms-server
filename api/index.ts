@@ -1,39 +1,35 @@
 import "reflect-metadata";
-import { NestFactory } from "@nestjs/core";
-import { ExpressAdapter } from "@nestjs/platform-express";
-import express, { Express, Request, Response } from "express";
-import { AppModule } from "../src/app.module";
-import { configureApp } from "../src/main";
+import type { Request, Response } from "express";
 
-let cachedServer: Express | null = null;
-let initPromise: Promise<Express> | null = null;
-
-async function bootstrapServer(): Promise<Express> {
-  const expressApp = express();
-  const adapter = new ExpressAdapter(expressApp);
-  const app = await NestFactory.create(AppModule, adapter, {
-    logger: ["error", "warn", "log"],
-  });
-
-  configureApp(app as any);
-  await app.init();
-  return expressApp;
-}
+let cachedHandler: any = null;
 
 export default async function handler(req: Request, res: Response) {
   try {
-    if (!cachedServer) {
-      if (!initPromise) {
-        initPromise = bootstrapServer();
-      }
-      cachedServer = await initPromise;
+    if (!cachedHandler) {
+      // Dynamically import ESM NestJS modules inside CommonJS serverless function
+      const { NestFactory } = await import("@nestjs/core");
+      const { ExpressAdapter } = await import("@nestjs/platform-express");
+      const express = (await import("express")).default;
+      const { AppModule } = await import("../src/app.module");
+      const { configureApp } = await import("../src/main");
+
+      const expressApp = express();
+      const adapter = new ExpressAdapter(expressApp);
+      const app = await NestFactory.create(AppModule, adapter, {
+        logger: ["error", "warn", "log"],
+      });
+
+      configureApp(app as any);
+      await app.init();
+      cachedHandler = expressApp;
     }
-    return cachedServer(req, res);
+
+    return cachedHandler(req, res);
   } catch (error: any) {
-    console.error("Vercel Serverless Function Init Error:", error);
+    console.error("Vercel Serverless Invocation Crash:", error);
     return res.status(500).json({
       statusCode: 500,
-      message: "Vercel Serverless Function Init Error",
+      message: "Vercel Serverless Dynamic Initialization Error",
       error: error?.message || String(error),
       stack: error?.stack,
     });
