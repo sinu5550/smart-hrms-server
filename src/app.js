@@ -95,9 +95,10 @@ app.use((err, _req, res, _next) => {
 
 module.exports = app;
 
-if (!process.env.VERCEL) {
+if (require.main === module) {
   const port = process.env.PORT || 3000;
   app.listen(port, () => {
     console.log(`Enterprise HRMS Backend (Node.js/Express) live on port ${port}`);
   });
 }
+
