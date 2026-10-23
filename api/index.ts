@@ -1,11 +1,12 @@
-import { INestApplication } from "@nestjs/common";
+import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { ExpressAdapter } from "@nestjs/platform-express";
 import express, { Express, Request, Response } from "express";
 import { AppModule } from "../src/app.module";
 import { configureApp } from "../src/main";
 
-let cachedServer: Express;
+let cachedServer: Express | null = null;
+let initPromise: Promise<Express> | null = null;
 
 async function bootstrapServer(): Promise<Express> {
   const expressApp = express();
@@ -22,16 +23,19 @@ async function bootstrapServer(): Promise<Express> {
 export default async function handler(req: Request, res: Response) {
   try {
     if (!cachedServer) {
-      cachedServer = await bootstrapServer();
+      if (!initPromise) {
+        initPromise = bootstrapServer();
+      }
+      cachedServer = await initPromise;
     }
     return cachedServer(req, res);
   } catch (error: any) {
-    console.error("Vercel Function Invocation Error:", error);
-    res.status(500).json({
+    console.error("Vercel Serverless Function Init Error:", error);
+    return res.status(500).json({
       statusCode: 500,
-      message: "Server initialization failed",
+      message: "Vercel Serverless Function Init Error",
       error: error?.message || String(error),
-      stack: process.env.NODE_ENV !== "production" ? error?.stack : undefined,
+      stack: error?.stack,
     });
   }
 }

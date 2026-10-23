@@ -2,7 +2,7 @@
   "name": "enterprise-hrms-backend",
   "version": "1.0.0",
   "engines": {
-    "node": ">=24.15.0"
+    "node": "20.x"
   },
   "scripts": {
     "build": "prisma generate && nest build",
