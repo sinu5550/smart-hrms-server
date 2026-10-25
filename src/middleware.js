@@ -98,6 +98,68 @@ function requirePermissions(prisma, requiredPermission) {
   };
 }
 
+function ipToInt(ip) {
+  if (!ip || typeof ip !== "string") return null;
+  const parts = ip.trim().split(".");
+  if (parts.length !== 4) return null;
+  let num = 0;
+  for (let i = 0; i < 4; i++) {
+    const n = Number(parts[i]);
+    if (isNaN(n) || n < 0 || n > 255 || parts[i].trim() === "") return null;
+    num = (num << 8) + n;
+  }
+  return num >>> 0;
+}
+
+function maskToInt(mask) {
+  if (!mask || typeof mask !== "string") return null;
+  const cleanMask = mask.trim().replace(/^\//, "");
+  if (/^\d+$/.test(cleanMask)) {
+    const bits = parseInt(cleanMask, 10);
+    if (bits < 0 || bits > 32) return null;
+    if (bits === 0) return 0;
+    return ((0xffffffff << (32 - bits)) >>> 0);
+  }
+  return ipToInt(cleanMask);
+}
+
+function isIpAllowed(clientIp, allowedPublicIp, subnetMask) {
+  if (!clientIp || !allowedPublicIp) return false;
+  const cleanClient = clientIp.trim();
+  let cleanAllowed = allowedPublicIp.trim();
+
+  // Handle localhost variations
+  const isLocalClient = cleanClient === "127.0.0.1" || cleanClient === "::1" || cleanClient === "localhost";
+  const isLocalAllowed = cleanAllowed === "127.0.0.1" || cleanAllowed === "::1" || cleanAllowed === "localhost";
+  if (isLocalClient && isLocalAllowed) return true;
+
+  // Direct exact match
+  if (cleanClient === cleanAllowed) return true;
+
+  // Check if allowedPublicIp contains CIDR notation (e.g., 45.248.148.0/24)
+  let effectiveMask = subnetMask ? subnetMask.trim() : null;
+  if (cleanAllowed.includes("/")) {
+    const [ipPart, cidrPart] = cleanAllowed.split("/");
+    cleanAllowed = ipPart.trim();
+    if (!effectiveMask) effectiveMask = cidrPart.trim();
+  }
+
+  // If no subnet mask specified, check exact match
+  if (!effectiveMask) {
+    return cleanClient === cleanAllowed;
+  }
+
+  const clientInt = ipToInt(cleanClient);
+  const allowedInt = ipToInt(cleanAllowed);
+  const maskInt = maskToInt(effectiveMask);
+
+  if (clientInt === null || allowedInt === null || maskInt === null) {
+    return cleanClient === cleanAllowed;
+  }
+
+  return ((clientInt & maskInt) >>> 0) === ((allowedInt & maskInt) >>> 0);
+}
+
 async function officeIpGuard(prisma, req, res, next) {
   const organizationId = req.user?.organizationId;
   if (!organizationId) {
@@ -114,21 +176,25 @@ async function officeIpGuard(prisma, req, res, next) {
   }
 
   try {
-    const network = await prisma.officeNetwork.findFirst({
+    const networks = await prisma.officeNetwork.findMany({
       where: {
         organizationId,
-        allowedPublicIp: clientIp,
         isActive: true,
       },
-      select: { id: true, locationName: true },
+      select: { id: true, locationName: true, allowedPublicIp: true, subnetMask: true },
     });
 
-    if (!network) {
+    const matchedNetwork = networks.find((net) =>
+      isIpAllowed(clientIp, net.allowedPublicIp, net.subnetMask)
+    );
+
+    if (!matchedNetwork) {
       return res.status(403).json({
         message: `Access blocked: Attendance and break actions must occur on Office Wi-Fi. Current IP: ${clientIp}`,
       });
     }
 
+    req.officeNetwork = matchedNetwork;
     next();
   } catch (err) {
     console.error("Office IP check error:", err);
@@ -142,4 +208,7 @@ module.exports = {
   requireRoles,
   requirePermissions,
   officeIpGuard,
+  isIpAllowed,
+  ipToInt,
+  maskToInt,
 };

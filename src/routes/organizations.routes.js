@@ -2,10 +2,16 @@ const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 const nodemailer = require("nodemailer");
-const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
+const { authenticateToken, requireRoles, requirePermissions, resolveClientIp } = require("../middleware");
 
 function createOrganizationsRouter(prisma) {
   const router = express.Router();
+
+  // GET /api/organizations/my-ip - Returns detected public IP of caller as seen by server
+  router.get("/my-ip", (req, res) => {
+    const ip = resolveClientIp(req);
+    return res.status(200).json({ ip });
+  });
 
   async function generateEmployeePrefix(name) {
     const words = name.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").trim().split(/\s+/).filter(Boolean);
