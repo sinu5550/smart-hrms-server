@@ -15,12 +15,15 @@ function createAuthRouter(prisma) {
       organizationId,
     };
 
+    // 30-day session lifespan for employee mobile attendance & sliding sessions
+    const sessionLifespan = "30d";
+
     const accessToken = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: "1d",
+      expiresIn: sessionLifespan,
     });
 
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
-      expiresIn: "7d",
+      expiresIn: sessionLifespan,
     });
 
     const refreshTokenHash = await bcrypt.hash(refreshToken, 10);
@@ -250,12 +253,15 @@ function createAuthRouter(prisma) {
         organizationId: user.organizationId,
       };
 
+      // Sliding session renewal: extend for another 30 days
+      const sessionLifespan = "30d";
+
       const newAccessToken = jwt.sign(newPayload, process.env.JWT_SECRET, {
-        expiresIn: "1d",
+        expiresIn: sessionLifespan,
       });
 
       const newRefreshToken = jwt.sign(newPayload, process.env.JWT_REFRESH_SECRET, {
-        expiresIn: "7d",
+        expiresIn: sessionLifespan,
       });
 
       const newRefreshHash = await bcrypt.hash(newRefreshToken, 10);
