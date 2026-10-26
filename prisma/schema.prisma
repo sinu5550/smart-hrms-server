@@ -147,6 +147,8 @@ model User {
   leaveBalances   LeaveBalance[]
   salaryStructure SalaryStructure[]
   payrollSlips    PayrollSlip[]
+  outworkRequests OutworkRequest[]
+  hrLoans         HrLoan[]
 
   @@unique([organizationId, employeeId])
   @@unique([organizationId, phone])
@@ -576,7 +578,10 @@ model OutworkRequest {
   updatedAt      DateTime      @updatedAt @map("updated_at")
 
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([organizationId, userId])
+  @@index([organizationId, status])
   @@map("outwork_requests")
 }
 
@@ -597,7 +602,10 @@ model HrLoan {
   updatedAt          DateTime      @updatedAt @map("updated_at")
 
   organization       Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user               User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([organizationId, userId])
+  @@index([organizationId, status])
   @@map("hr_loans")
 }
 

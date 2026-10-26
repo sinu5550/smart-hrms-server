@@ -20,7 +20,27 @@ function createLoansRouter(prisma) {
         orderBy: { createdAt: "desc" },
       });
 
-      return res.status(200).json(loans);
+      const userIds = [...new Set(loans.map((l) => l.userId).filter(Boolean))];
+      const users = userIds.length
+        ? await prisma.user.findMany({
+            where: { id: { in: userIds } },
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              avatarUrl: true,
+              department: { select: { name: true } },
+            },
+          })
+        : [];
+      const userMap = new Map(users.map((u) => [u.id, u]));
+
+      const enriched = loans.map((l) => ({
+        ...l,
+        user: userMap.get(l.userId) || { fullName: "Employee", employeeId: "N/A" },
+      }));
+
+      return res.status(200).json(enriched);
     } catch (err) {
       next(err);
     }

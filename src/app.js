@@ -14,6 +14,7 @@ const { createDevicesRouter } = require("./routes/devices.routes");
 const { createCoreHrRouter } = require("./routes/core-hr.routes");
 const { createOutworkRouter } = require("./routes/outwork.routes");
 const { createLoansRouter } = require("./routes/loans.routes");
+const { createLeaveRouter } = require("./routes/leave.routes");
 
 const app = express();
 
@@ -86,6 +87,7 @@ apiRouter.use("/devices", createDevicesRouter(prisma));
 apiRouter.use("/core-hr", createCoreHrRouter(prisma));
 apiRouter.use("/outwork", createOutworkRouter(prisma));
 apiRouter.use("/loans", createLoansRouter(prisma));
+apiRouter.use("/leave", createLeaveRouter(prisma));
 
 app.use("/api", apiRouter);
 

@@ -20,7 +20,27 @@ function createOutworkRouter(prisma) {
         orderBy: { createdAt: "desc" },
       });
 
-      return res.status(200).json(requests);
+      const userIds = [...new Set(requests.map((r) => r.userId).filter(Boolean))];
+      const users = userIds.length
+        ? await prisma.user.findMany({
+            where: { id: { in: userIds } },
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              avatarUrl: true,
+              department: { select: { name: true } },
+            },
+          })
+        : [];
+      const userMap = new Map(users.map((u) => [u.id, u]));
+
+      const enriched = requests.map((r) => ({
+        ...r,
+        user: userMap.get(r.userId) || { fullName: "Employee", employeeId: "N/A" },
+      }));
+
+      return res.status(200).json(enriched);
     } catch (err) {
       next(err);
     }
