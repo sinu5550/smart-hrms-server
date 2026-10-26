@@ -89,6 +89,11 @@ function createEmployeesRouter(prisma) {
       });
       const ownerEmail = org?.ownerEmail?.toLowerCase();
 
+      // The Organization Owner must NOT be listed in the employee directory
+      if (ownerEmail) {
+        where.email = { not: ownerEmail };
+      }
+
       const employees = await prisma.user.findMany({
         where,
         select: {
@@ -126,7 +131,7 @@ function createEmployeesRouter(prisma) {
 
       const result = employees.map((emp) => ({
         ...emp,
-        isOwner: Boolean(ownerEmail && emp.email?.toLowerCase() === ownerEmail),
+        isOwner: false,
       }));
 
       return res.status(200).json(result);
@@ -376,6 +381,16 @@ function createEmployeesRouter(prisma) {
         select: { ownerEmail: true },
       });
       const isOwner = Boolean(org?.ownerEmail && org.ownerEmail.toLowerCase() === user.email.toLowerCase());
+      const isCallerTheOwner = Boolean(
+        org?.ownerEmail && org.ownerEmail.toLowerCase() === req.user.email.toLowerCase()
+      );
+
+      // Only the Owner can modify Owner details
+      if (isOwner && !isCallerTheOwner) {
+        return res.status(403).json({
+          message: "Access denied: Organization Owner details can only be managed by the Owner.",
+        });
+      }
 
       if (isOwner && dto.role && dto.role !== user.role) {
         return res.status(403).json({
