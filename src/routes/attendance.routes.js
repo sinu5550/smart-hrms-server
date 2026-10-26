@@ -370,14 +370,31 @@ function createAttendanceRouter(prisma) {
   router.get("/admin/today", requireRoles("HR", "ADMIN"), async (req, res, next) => {
     try {
       const today = getUtcMidnightToday();
+      const org = await prisma.organization.findUnique({
+        where: { id: req.user.organizationId },
+        select: { ownerEmail: true },
+      });
+      const ownerEmail = org?.ownerEmail?.toLowerCase();
+
       const records = await prisma.attendance.findMany({
-        where: { organizationId: req.user.organizationId, date: today },
+        where: {
+          organizationId: req.user.organizationId,
+          date: today,
+          ...(ownerEmail
+            ? {
+                user: {
+                  email: { not: ownerEmail },
+                },
+              }
+            : {}),
+        },
         include: {
           user: {
             select: {
               id: true,
               employeeId: true,
               fullName: true,
+              email: true,
               avatarUrl: true,
               department: { select: { name: true } },
             },
@@ -403,15 +420,32 @@ function createAttendanceRouter(prisma) {
         return res.status(400).json({ message: "Date query parameter is required." });
       }
 
+      const org = await prisma.organization.findUnique({
+        where: { id: req.user.organizationId },
+        select: { ownerEmail: true },
+      });
+      const ownerEmail = org?.ownerEmail?.toLowerCase();
+
       const targetDate = new Date(date);
       const records = await prisma.attendance.findMany({
-        where: { organizationId: req.user.organizationId, date: targetDate },
+        where: {
+          organizationId: req.user.organizationId,
+          date: targetDate,
+          ...(ownerEmail
+            ? {
+                user: {
+                  email: { not: ownerEmail },
+                },
+              }
+            : {}),
+        },
         include: {
           user: {
             select: {
               id: true,
               employeeId: true,
               fullName: true,
+              email: true,
               avatarUrl: true,
               department: { select: { name: true } },
             },
