@@ -55,11 +55,22 @@ function createAttendanceRouter(prisma) {
         },
       });
 
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.userId },
+        select: { attendanceExempt: true, role: true, organization: { select: { ownerEmail: true } } },
+      });
+      const isOwner = Boolean(
+        user?.role === "OWNER" ||
+        (user?.organization?.ownerEmail && req.user.email?.toLowerCase() === user.organization.ownerEmail.toLowerCase())
+      );
+      const isExempt = Boolean(isOwner || user?.attendanceExempt);
+
       if (!attendance) {
         return res.status(200).json({
           checkedIn: false,
           checkedOut: false,
           attendance: null,
+          isExempt,
         });
       }
 
@@ -67,6 +78,7 @@ function createAttendanceRouter(prisma) {
         checkedIn: true,
         checkedOut: attendance.currentState === "CHECKED_OUT",
         attendance,
+        isExempt,
       });
     } catch (err) {
       next(err);

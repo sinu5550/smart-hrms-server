@@ -106,6 +106,7 @@ function createEmployeesRouter(prisma) {
           status: true,
           bloodGroup: true,
           avatarUrl: true,
+          attendanceExempt: true,
           permissions: true,
           joiningDate: true,
           gender: true,
@@ -161,6 +162,7 @@ function createEmployeesRouter(prisma) {
           status: true,
           bloodGroup: true,
           avatarUrl: true,
+          attendanceExempt: true,
           permissions: true,
           joiningDate: true,
           resignationDate: true,
@@ -362,10 +364,17 @@ function createEmployeesRouter(prisma) {
             });
           }
 
-          // General profile editing:
-          if (!callerPerms.includes("employees.edit") && !callerPerms.includes("employees.permissions") && !callerPerms.includes("employees.roles")) {
+          // If updating attendance exemption status:
+          if (dto.attendanceExempt !== undefined && !callerPerms.includes("attendance.exempt")) {
             return res.status(403).json({
-              message: "Access denied: You do not possess the 'employees.edit' privilege to update personnel.",
+              message: "Access denied: You do not possess the 'attendance.exempt' privilege to exempt employees from attendance.",
+            });
+          }
+
+          // General profile editing:
+          if (!callerPerms.includes("employees.edit") && !callerPerms.includes("employees.permissions") && !callerPerms.includes("employees.roles") && !callerPerms.includes("attendance.exempt")) {
+            return res.status(403).json({
+              message: "Access denied: You do not possess the required privilege to update personnel.",
             });
           }
         }
@@ -452,6 +461,7 @@ function createEmployeesRouter(prisma) {
           gender: dto.gender,
           joiningDate: dto.joiningDate ? new Date(dto.joiningDate) : undefined,
           avatarUrl: dto.avatarUrl,
+          attendanceExempt: dto.attendanceExempt !== undefined ? Boolean(dto.attendanceExempt) : undefined,
           ...permissionsData,
         },
         select: {
@@ -464,6 +474,7 @@ function createEmployeesRouter(prisma) {
           status: true,
           bloodGroup: true,
           avatarUrl: true,
+          attendanceExempt: true,
           permissions: true,
           shiftId: true,
           shift: { select: { id: true, shiftName: true, startTime: true, endTime: true } },

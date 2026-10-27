@@ -138,6 +138,7 @@ model User {
   isDeleted          Boolean   @default(false) @map("is_deleted")
   mustChangePassword Boolean   @default(false) @map("must_change_password")
   deletedAt          DateTime? @map("deleted_at")
+  attendanceExempt   Boolean   @default(false) @map("attendance_exempt")
   permissions        Json?     @default("[]") @map("permissions")
 
   createdAt DateTime @default(now()) @map("created_at")
