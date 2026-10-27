@@ -427,9 +427,9 @@ function createAttendanceRouter(prisma) {
   // GET /api/attendance/admin/by-date
   router.get("/admin/by-date", requireRoles("HR", "ADMIN"), async (req, res, next) => {
     try {
-      const { date } = req.query;
-      if (!date) {
-        return res.status(400).json({ message: "Date query parameter is required." });
+      const { date, startDate, endDate } = req.query;
+      if (!date && !startDate) {
+        return res.status(400).json({ message: "Date or startDate query parameter is required." });
       }
 
       const org = await prisma.organization.findUnique({
@@ -438,11 +438,24 @@ function createAttendanceRouter(prisma) {
       });
       const ownerEmail = org?.ownerEmail?.toLowerCase();
 
-      const targetDate = new Date(date);
+      let dateFilter = {};
+      if (startDate && endDate) {
+        dateFilter = {
+          gte: new Date(startDate),
+          lte: new Date(endDate),
+        };
+      } else if (startDate) {
+        dateFilter = {
+          gte: new Date(startDate),
+        };
+      } else {
+        dateFilter = new Date(date);
+      }
+
       const records = await prisma.attendance.findMany({
         where: {
           organizationId: req.user.organizationId,
-          date: targetDate,
+          date: dateFilter,
           ...(ownerEmail
             ? {
                 user: {
@@ -466,7 +479,7 @@ function createAttendanceRouter(prisma) {
             orderBy: { startTime: "desc" },
           },
         },
-        orderBy: { checkInTime: "asc" },
+        orderBy: [{ date: "desc" }, { checkInTime: "asc" }],
       });
 
       return res.status(200).json(records);
