@@ -238,6 +238,178 @@ function createDevicesRouter(prisma) {
     }
   });
 
+  // POST /api/devices/:id/sync-persons (Fetch all 23+ persons registered on Hikvision device)
+  router.post("/:id/sync-persons", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+
+      if (!device || !device.ipAddress) {
+        return res.status(404).json({ message: "Device not found or IP address not configured." });
+      }
+
+      const org = await prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { employeePrefix: true },
+      });
+      const prefix = (org?.employeePrefix || "EKH").trim().toUpperCase();
+
+      const user = device.username || "admin";
+      const pass = device.password || "";
+      const host = device.ipAddress;
+      const path = "/ISAPI/AccessControl/UserInfo/Search?format=json";
+
+      const searchBody = JSON.stringify({
+        UserInfoSearchCond: {
+          searchID: "1",
+          searchResultPosition: 0,
+          maxResults: 100,
+        },
+      });
+
+      // 2-phase digest request
+      const hikData = await new Promise((resolve, reject) => {
+        const probeOpts = {
+          hostname: host,
+          port: 443,
+          path,
+          method: "POST",
+          rejectUnauthorized: false,
+          timeout: 6000,
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": 0,
+          },
+        };
+
+        const req1 = https.request(probeOpts, (res1) => {
+          let b1 = "";
+          res1.on("data", (c) => (b1 += c));
+          res1.on("end", () => {
+            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+              const auth = res1.headers["www-authenticate"];
+              const digest = buildDigestHeader("POST", path, user, pass, auth);
+
+              const postOpts = {
+                hostname: host,
+                port: 443,
+                path,
+                method: "POST",
+                rejectUnauthorized: false,
+                timeout: 8000,
+                headers: {
+                  "Content-Type": "application/json",
+                  "Content-Length": Buffer.byteLength(searchBody),
+                  Authorization: digest,
+                },
+              };
+
+              const req2 = https.request(postOpts, (res2) => {
+                let b2 = "";
+                res2.on("data", (c) => (b2 += c));
+                res2.on("end", () => {
+                  try {
+                    const parsed = JSON.parse(b2);
+                    resolve(parsed);
+                  } catch (e) {
+                    reject(new Error("Invalid JSON response from Hikvision terminal."));
+                  }
+                });
+              });
+              req2.on("error", reject);
+              req2.write(searchBody);
+              req2.end();
+            } else {
+              reject(new Error(`Hikvision returned unexpected probe code: ${res1.statusCode}`));
+            }
+          });
+        });
+
+        req1.on("error", reject);
+        req1.end();
+      });
+
+      const userList = hikData?.UserInfoSearch?.UserInfo || [];
+      const totalMatches = hikData?.UserInfoSearch?.totalMatches || userList.length;
+
+      let importedCount = 0;
+      let updatedCount = 0;
+      const bcrypt = require("bcrypt");
+      const defaultPasswordHash = await bcrypt.hash("12345678", 10);
+
+      for (const item of userList) {
+        const rawEmpNo = String(item.employeeNo || "").trim();
+        const fullName = String(item.name || `Employee ${rawEmpNo}`).trim();
+        if (!rawEmpNo) continue;
+
+        // Standardize employee ID format (e.g. EKH-26-0001 or raw if formatted)
+        let formattedEmployeeId = rawEmpNo;
+        if (!rawEmpNo.toUpperCase().startsWith(prefix)) {
+          formattedEmployeeId = `${prefix}-26-${rawEmpNo.padStart(4, "0")}`;
+        }
+
+        const candidateEmail = `${rawEmpNo.toLowerCase().replace(/[^a-z0-9]/g, "")}_${organizationId.slice(0, 4)}@company.local`;
+
+        // Check if employee already exists in organization by ID
+        const existingEmp = await prisma.user.findFirst({
+          where: {
+            organizationId,
+            OR: [
+              { employeeId: formattedEmployeeId },
+              { employeeId: rawEmpNo },
+              { employeeId: { endsWith: rawEmpNo } },
+            ],
+          },
+        });
+
+        if (existingEmp) {
+          // Update full name if needed
+          await prisma.user.update({
+            where: { id: existingEmp.id },
+            data: {
+              fullName: fullName || existingEmp.fullName,
+              gender: item.gender === "male" ? "MALE" : item.gender === "female" ? "FEMALE" : existingEmp.gender,
+            },
+          });
+          updatedCount++;
+        } else {
+          // Create new employee
+          await prisma.user.create({
+            data: {
+              organizationId,
+              employeeId: formattedEmployeeId,
+              email: candidateEmail,
+              passwordHash: defaultPasswordHash,
+              fullName,
+              gender: item.gender === "male" ? "MALE" : item.gender === "female" ? "FEMALE" : "OTHER",
+              role: "EMPLOYEE",
+              status: "ACTIVE",
+              mustChangePassword: true,
+            },
+          });
+          importedCount++;
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        totalFound: totalMatches,
+        importedCount,
+        updatedCount,
+        message: `Successfully synced ${userList.length} persons from Hikvision (${importedCount} newly added, ${updatedCount} updated).`,
+      });
+    } catch (err) {
+      console.error("Hikvision Sync Persons Error:", err.message);
+      return res.status(500).json({
+        message: err.message || "Failed to sync persons from Hikvision device.",
+      });
+    }
+  });
+
   // GET /api/devices/logs (Admin, HR with devices.view)
   router.get("/logs", authenticateToken, requirePermissions(prisma, "devices.view"), async (req, res, next) => {
     try {
