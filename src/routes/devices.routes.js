@@ -238,7 +238,7 @@ function createDevicesRouter(prisma) {
     }
   });
 
-  // POST /api/devices/:id/sync-persons (Fetch all 23+ persons registered on Hikvision device)
+  // GET /api/devices/:id/portal (Live terminal diagnostic & registered persons view)
   router.post("/:id/sync-persons", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
     try {
       const { id } = req.params;
@@ -366,18 +366,32 @@ function createDevicesRouter(prisma) {
           },
         });
 
+        // Extract biometric enrollment counts from terminal record
+        const numOfFP = Number(item.numOfFP || 0);
+        const numOfFace = Number(item.numOfFace || 0);
+
         if (existingEmp) {
-          // Update full name if needed
+          // Merge biometric info into existing user permissions JSON
+          const curPerms = Array.isArray(existingEmp.permissions) ? existingEmp.permissions : [];
+          const updatedPerms = curPerms.filter((p) => typeof p === "string" && !p.startsWith("bio:"));
+          if (numOfFP > 0) updatedPerms.push("bio:fingerprint");
+          if (numOfFace > 0) updatedPerms.push("bio:face");
+
           await prisma.user.update({
             where: { id: existingEmp.id },
             data: {
               fullName: fullName || existingEmp.fullName,
               gender: item.gender === "male" ? "MALE" : item.gender === "female" ? "FEMALE" : existingEmp.gender,
+              permissions: updatedPerms,
             },
           });
           updatedCount++;
         } else {
-          // Create new employee
+          // Create new employee with bio permissions tags
+          const newPerms = [];
+          if (numOfFP > 0) newPerms.push("bio:fingerprint");
+          if (numOfFace > 0) newPerms.push("bio:face");
+
           await prisma.user.create({
             data: {
               organizationId,
@@ -389,6 +403,7 @@ function createDevicesRouter(prisma) {
               role: "EMPLOYEE",
               status: "ACTIVE",
               mustChangePassword: true,
+              permissions: newPerms,
             },
           });
           importedCount++;
@@ -407,6 +422,128 @@ function createDevicesRouter(prisma) {
       return res.status(500).json({
         message: err.message || "Failed to sync persons from Hikvision device.",
       });
+    }
+  });
+
+  // GET /api/devices/:id/portal (Device Portal details with live persons status)
+  router.get("/:id/portal", authenticateToken, requirePermissions(prisma, "devices.view"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+
+      if (!device) {
+        return res.status(404).json({ message: "Biometric device record not found." });
+      }
+
+      // Fetch recent raw punches from this device
+      const recentLogs = await prisma.biometricRawLog.findMany({
+        where: {
+          organizationId,
+          deviceSerialNumber: device.deviceSerialNumber,
+        },
+        orderBy: { punchTime: "desc" },
+        take: 20,
+      });
+
+      // Try reading live registered users from device if online
+      let terminalUsers = [];
+      let isTerminalReachable = false;
+
+      if (device.ipAddress) {
+        try {
+          const user = device.username || "admin";
+          const pass = device.password || "";
+          const host = device.ipAddress;
+          const path = "/ISAPI/AccessControl/UserInfo/Search?format=json";
+          const searchBody = JSON.stringify({
+            UserInfoSearchCond: {
+              searchID: "1",
+              searchResultPosition: 0,
+              maxResults: 100,
+            },
+          });
+
+          const data = await new Promise((resolve, reject) => {
+            const req1 = https.request(
+              {
+                hostname: host,
+                port: 443,
+                path,
+                method: "POST",
+                rejectUnauthorized: false,
+                timeout: 3000,
+                headers: { "Content-Type": "application/json", "Content-Length": 0 },
+              },
+              (res1) => {
+                if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                  const auth = res1.headers["www-authenticate"];
+                  const digest = buildDigestHeader("POST", path, user, pass, auth);
+                  const req2 = https.request(
+                    {
+                      hostname: host,
+                      port: 443,
+                      path,
+                      method: "POST",
+                      rejectUnauthorized: false,
+                      timeout: 4000,
+                      headers: {
+                        "Content-Type": "application/json",
+                        "Content-Length": Buffer.byteLength(searchBody),
+                        Authorization: digest,
+                      },
+                    },
+                    (res2) => {
+                      let buf = "";
+                      res2.on("data", (c) => (buf += c));
+                      res2.on("end", () => {
+                        try {
+                          resolve(JSON.parse(buf));
+                        } catch (e) {
+                          reject(e);
+                        }
+                      });
+                    }
+                  );
+                  req2.on("error", reject);
+                  req2.write(searchBody);
+                  req2.end();
+                } else {
+                  reject(new Error("Probe did not return 401"));
+                }
+              }
+            );
+            req1.on("error", reject);
+            req1.end();
+          });
+
+          terminalUsers = data?.UserInfoSearch?.UserInfo || [];
+          isTerminalReachable = true;
+        } catch (err) {
+          console.warn("Could not fetch live terminal users:", err.message);
+        }
+      }
+
+      return res.status(200).json({
+        device,
+        isTerminalReachable,
+        totalTerminalUsers: terminalUsers.length,
+        terminalUsers: terminalUsers.map((u) => ({
+          employeeNo: u.employeeNo,
+          name: u.name,
+          userType: u.userType,
+          hasFingerprint: Number(u.numOfFP || 0) > 0,
+          numOfFP: Number(u.numOfFP || 0),
+          hasFace: Number(u.numOfFace || 0) > 0,
+          numOfFace: Number(u.numOfFace || 0),
+        })),
+        recentLogs,
+      });
+    } catch (err) {
+      next(err);
     }
   });
 
