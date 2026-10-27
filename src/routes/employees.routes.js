@@ -697,6 +697,62 @@ function createEmployeesRouter(prisma) {
     }
   });
 
+  // POST /api/employees/bulk-delete (Admin/HR)
+  router.post("/bulk-delete", async (req, res, next) => {
+    try {
+      const { ids } = req.body || {};
+      const organizationId = req.user.organizationId;
+
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ message: "No employee IDs provided for deletion." });
+      }
+
+      const org = await prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { ownerEmail: true },
+      });
+      const ownerEmail = org?.ownerEmail?.toLowerCase();
+
+      // Find valid target users in this organization excluding owner
+      const targetUsers = await prisma.user.findMany({
+        where: {
+          id: { in: ids },
+          organizationId,
+          isDeleted: false,
+          ...(ownerEmail ? { email: { not: ownerEmail } } : {}),
+        },
+        select: { id: true, employeeId: true, email: true },
+      });
+
+      if (targetUsers.length === 0) {
+        return res.status(400).json({ message: "No deletable employees found among the provided IDs." });
+      }
+
+      const validIds = targetUsers.map((u) => u.id);
+
+      const result = await prisma.user.updateMany({
+        where: {
+          id: { in: validIds },
+          organizationId,
+        },
+        data: {
+          isDeleted: true,
+          deletedAt: new Date(),
+          status: "TERMINATED",
+          refreshTokenHash: null,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        deletedCount: result.count,
+        message: `Successfully deleted ${result.count} employee(s).`,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 
