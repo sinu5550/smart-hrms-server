@@ -1,5 +1,7 @@
 const express = require("express");
 const crypto = require("crypto");
+const http = require("http");
+const https = require("https");
 const QRCode = require("qrcode");
 const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
 
@@ -101,9 +103,11 @@ function createDevicesRouter(prisma) {
           organizationId,
           deviceName: dto.deviceName,
           deviceSerialNumber: dto.deviceSerialNumber,
-          deviceModel: dto.deviceModel || "ZKTeco / ADMS Standalone",
+          deviceModel: dto.deviceModel || "Hikvision Face & Fingerprint Terminal",
           ipAddress: dto.ipAddress || null,
-          port: dto.port || 4370,
+          port: dto.port ? Number(dto.port) : 80,
+          username: dto.username || "admin",
+          password: dto.password || null,
           locationName: dto.locationName || "Main Entrance Gate",
           status: "ONLINE",
           lastHeartbeat: new Date(),
@@ -131,6 +135,104 @@ function createDevicesRouter(prisma) {
 
       const deleted = await prisma.biometricDevice.delete({ where: { id } });
       return res.status(200).json(deleted);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Helper to compute HTTP Digest Auth header
+  function buildDigestHeader(method, uri, user, pass, authHeader) {
+    const parts = {};
+    authHeader.replace(/^Digest\s+/, "").split(/,\s*/).forEach(p => {
+      const idx = p.indexOf("=");
+      if (idx !== -1) {
+        parts[p.slice(0, idx).trim()] = p.slice(idx + 1).replace(/"/g, "").trim();
+      }
+    });
+
+    const realm = parts.realm || "";
+    const nonce = parts.nonce || "";
+    const qop = parts.qop || "";
+    const cnonce = crypto.randomBytes(8).toString("hex");
+    const nc = "00000001";
+
+    const ha1 = crypto.createHash("md5").update(`${user}:${realm}:${pass}`).digest("hex");
+    const ha2 = crypto.createHash("md5").update(`${method}:${uri}`).digest("hex");
+    if (qop.includes("auth")) {
+      const response = crypto.createHash("md5").update(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`).digest("hex");
+      return `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${uri}", qop=auth, nc=${nc}, cnonce="${cnonce}", response="${response}"`;
+    } else {
+      const response = crypto.createHash("md5").update(`${ha1}:${nonce}:${ha2}`).digest("hex");
+      return `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${response}"`;
+    }
+  }
+
+  // GET /api/devices/:id/snapshot (Live camera frame proxy)
+  router.get("/:id/snapshot", authenticateToken, requirePermissions(prisma, "devices.view"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId: req.user.organizationId },
+      });
+
+      if (!device || !device.ipAddress) {
+        return res.status(404).json({ message: "Device not found or IP address not configured." });
+      }
+
+      const user = device.username || "admin";
+      const pass = device.password || "";
+      const host = device.ipAddress;
+      const isHttps = true; // Hikvision standard secure port 443
+      const port = 443;
+      const path = "/ISAPI/Streaming/channels/101/picture";
+
+      const client = isHttps ? https : http;
+      const opts = {
+        hostname: host,
+        port,
+        path,
+        method: "GET",
+        rejectUnauthorized: false,
+        timeout: 5000,
+      };
+
+      const req1 = client.request(opts, (res1) => {
+        if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+          const auth = res1.headers["www-authenticate"];
+          const digestHeader = buildDigestHeader("GET", path, user, pass, auth);
+
+          const req2 = client.request(
+            { ...opts, headers: { Authorization: digestHeader } },
+            (res2) => {
+              if (res2.statusCode !== 200) {
+                return res.status(res2.statusCode).json({ message: "Device camera authentication failed or channel unreachable." });
+              }
+              res.setHeader("Content-Type", res2.headers["content-type"] || "image/jpeg");
+              res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+              res2.pipe(res);
+            }
+          );
+
+          req2.on("error", (err) => {
+            console.error("Camera proxy sub-request error:", err.message);
+            res.status(502).json({ message: "Failed to fetch camera snapshot from device." });
+          });
+          req2.end();
+        } else if (res1.statusCode === 200) {
+          res.setHeader("Content-Type", res1.headers["content-type"] || "image/jpeg");
+          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+          res1.pipe(res);
+        } else {
+          res.status(res1.statusCode).json({ message: `Device returned status: ${res1.statusCode}` });
+        }
+      });
+
+      req1.on("error", (err) => {
+        console.error("Camera proxy connection error:", err.message);
+        res.status(504).json({ message: "Could not reach device on local network. Verify IP & Wi-Fi connection." });
+      });
+
+      req1.end();
     } catch (err) {
       next(err);
     }

@@ -530,6 +530,8 @@ model BiometricDevice {
   deviceModel        String?           @default("ZKTeco / ADMS") @map("device_model")
   ipAddress          String?           @map("ip_address")
   port               Int?              @default(4370)
+  username           String?           @default("admin")
+  password           String?
   locationName       String?           @default("Main Gate") @map("location_name")
   status             String?           @default("ONLINE")
   lastHeartbeat      DateTime?         @map("last_heartbeat")
