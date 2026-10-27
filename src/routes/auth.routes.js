@@ -60,6 +60,7 @@ function createAuthRouter(prisma) {
         email: user.email,
         fullName: user.fullName,
         role: user.role,
+        isOwner: user.role === "OWNER" || (organizationData?.ownerEmail && user.email?.toLowerCase() === organizationData.ownerEmail.toLowerCase()),
         status: user.status,
         avatarUrl: user.avatarUrl,
         permissions: activePermissions,
@@ -317,6 +318,7 @@ function createAuthRouter(prisma) {
 
       return res.status(200).json({
         ...user,
+        isOwner: user.role === "OWNER" || (user.organization?.ownerEmail && user.email?.toLowerCase() === user.organization.ownerEmail.toLowerCase()),
         permissions: mergedPermissions,
       });
     } catch (err) {

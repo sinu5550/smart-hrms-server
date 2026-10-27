@@ -41,6 +41,14 @@ function requireRoles(...allowedRoles) {
     if (!req.user) {
       return res.status(401).json({ message: "Unauthorized" });
     }
+    // PLATFORM_ADMIN always has full access
+    if (req.user.role === "PLATFORM_ADMIN") {
+      return next();
+    }
+    // OWNER has full access to workspace resources (unless it's strictly platform-only)
+    if (req.user.role === "OWNER" && !allowedRoles.every(r => r === "PLATFORM_ADMIN")) {
+      return next();
+    }
     if (allowedRoles.length && !allowedRoles.includes(req.user.role)) {
       return res.status(403).json({ message: "Forbidden: Insufficient privileges." });
     }
@@ -54,8 +62,8 @@ function requirePermissions(prisma, requiredPermission) {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    // Platform admin and Workspace Admin/Owner always have full privileges
-    if (req.user.role === "PLATFORM_ADMIN" || req.user.role === "ADMIN") {
+    // Platform admin, Workspace Owner, and Workspace Admin always have full privileges
+    if (req.user.role === "PLATFORM_ADMIN" || req.user.role === "OWNER" || req.user.role === "ADMIN") {
       return next();
     }
 

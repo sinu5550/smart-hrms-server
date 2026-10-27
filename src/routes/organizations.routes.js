@@ -86,7 +86,7 @@ function createOrganizationsRouter(prisma) {
                   email,
                   passwordHash,
                   fullName: (dto.ownerName || "").trim(),
-                  role: "ADMIN",
+                  role: "OWNER",
                   mustChangePassword: false,
                 },
               },
