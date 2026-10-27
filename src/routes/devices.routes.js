@@ -439,17 +439,7 @@ function createDevicesRouter(prisma) {
         return res.status(404).json({ message: "Biometric device record not found." });
       }
 
-      // Fetch recent raw punches from this device
-      const recentLogs = await prisma.biometricRawLog.findMany({
-        where: {
-          organizationId,
-          deviceSerialNumber: device.deviceSerialNumber,
-        },
-        orderBy: { punchTime: "desc" },
-        take: 20,
-      });
-
-      // Try reading live registered users from device if online
+      // Auto-sync latest terminal AcsEvents into biometricRawLog & attendance so Recent Punches are never empty
       let terminalUsers = [];
       let isTerminalReachable = false;
 
@@ -458,7 +448,9 @@ function createDevicesRouter(prisma) {
           const user = device.username || "admin";
           const pass = device.password || "";
           const host = device.ipAddress;
-          const path = "/ISAPI/AccessControl/UserInfo/Search?format=json";
+
+          // 1. Fetch Users
+          const userPath = "/ISAPI/AccessControl/UserInfo/Search?format=json";
           const searchBody = JSON.stringify({
             UserInfoSearchCond: {
               searchID: "1",
@@ -467,12 +459,12 @@ function createDevicesRouter(prisma) {
             },
           });
 
-          const data = await new Promise((resolve, reject) => {
+          const userData = await new Promise((resolve, reject) => {
             const req1 = https.request(
               {
                 hostname: host,
                 port: 443,
-                path,
+                path: userPath,
                 method: "POST",
                 rejectUnauthorized: false,
                 timeout: 3000,
@@ -481,12 +473,12 @@ function createDevicesRouter(prisma) {
               (res1) => {
                 if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
                   const auth = res1.headers["www-authenticate"];
-                  const digest = buildDigestHeader("POST", path, user, pass, auth);
+                  const digest = buildDigestHeader("POST", userPath, user, pass, auth);
                   const req2 = https.request(
                     {
                       hostname: host,
                       port: 443,
-                      path,
+                      path: userPath,
                       method: "POST",
                       rejectUnauthorized: false,
                       timeout: 4000,
@@ -520,12 +512,231 @@ function createDevicesRouter(prisma) {
             req1.end();
           });
 
-          terminalUsers = data?.UserInfoSearch?.UserInfo || [];
+          terminalUsers = userData?.UserInfoSearch?.UserInfo || [];
           isTerminalReachable = true;
+
+          // 2. Fetch Latest 40 AcsEvents and record any new punches
+          const eventPath = "/ISAPI/AccessControl/AcsEvent?format=json";
+          const eventProbeBody = JSON.stringify({
+            AcsEventCond: {
+              searchID: "1",
+              searchResultPosition: 0,
+              maxResults: 1,
+              major: 0,
+              minor: 0,
+            },
+          });
+
+          const totalEvMatches = await new Promise((resolve) => {
+            const r1 = https.request(
+              {
+                hostname: host,
+                port: 443,
+                path: eventPath,
+                method: "POST",
+                rejectUnauthorized: false,
+                timeout: 2500,
+                headers: { "Content-Type": "application/json", "Content-Length": 0 },
+              },
+              (res1) => {
+                if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                  const digest = buildDigestHeader("POST", eventPath, user, pass, res1.headers["www-authenticate"]);
+                  const r2 = https.request(
+                    {
+                      hostname: host,
+                      port: 443,
+                      path: eventPath,
+                      method: "POST",
+                      rejectUnauthorized: false,
+                      timeout: 3000,
+                      headers: {
+                        "Content-Type": "application/json",
+                        "Content-Length": Buffer.byteLength(eventProbeBody),
+                        Authorization: digest,
+                      },
+                    },
+                    (res2) => {
+                      let b = "";
+                      res2.on("data", (c) => (b += c));
+                      res2.on("end", () => {
+                        try {
+                          resolve(Number(JSON.parse(b).AcsEvent?.totalMatches || 0));
+                        } catch (e) {
+                          resolve(0);
+                        }
+                      });
+                    }
+                  );
+                  r2.on("error", () => resolve(0));
+                  r2.write(eventProbeBody);
+                  r2.end();
+                } else {
+                  resolve(0);
+                }
+              }
+            );
+            r1.on("error", () => resolve(0));
+            r1.end();
+          });
+
+          if (totalEvMatches > 0) {
+            const evFetchBody = JSON.stringify({
+              AcsEventCond: {
+                searchID: "2",
+                searchResultPosition: Math.max(0, totalEvMatches - 40),
+                maxResults: 40,
+                major: 0,
+                minor: 0,
+              },
+            });
+
+            const evList = await new Promise((resolve) => {
+              const r1 = https.request(
+                {
+                  hostname: host,
+                  port: 443,
+                  path: eventPath,
+                  method: "POST",
+                  rejectUnauthorized: false,
+                  timeout: 2500,
+                  headers: { "Content-Type": "application/json", "Content-Length": 0 },
+                },
+                (res1) => {
+                  if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                    const digest = buildDigestHeader("POST", eventPath, user, pass, res1.headers["www-authenticate"]);
+                    const r2 = https.request(
+                      {
+                        hostname: host,
+                        port: 443,
+                        path: eventPath,
+                        method: "POST",
+                        rejectUnauthorized: false,
+                        timeout: 4000,
+                        headers: {
+                          "Content-Type": "application/json",
+                          "Content-Length": Buffer.byteLength(evFetchBody),
+                          Authorization: digest,
+                        },
+                      },
+                      (res2) => {
+                        let b = "";
+                        res2.on("data", (c) => (b += c));
+                        res2.on("end", () => {
+                          try {
+                            resolve(JSON.parse(b).AcsEvent?.InfoList || []);
+                          } catch (e) {
+                            resolve([]);
+                          }
+                        });
+                      }
+                    );
+                    r2.on("error", () => resolve([]));
+                    r2.write(evFetchBody);
+                    r2.end();
+                  } else {
+                    resolve([]);
+                  }
+                }
+              );
+              r1.on("error", () => resolve([]));
+              r1.end();
+            });
+
+            const personEvents = evList.filter(
+              (e) => e.major === 5 && (e.minor === 75 || e.minor === 38 || e.minor === 104 || e.minor === 1) && e.employeeNoString
+            );
+
+            for (const ev of personEvents) {
+              const rawEmp = String(ev.employeeNoString).trim();
+              const punchDate = new Date(ev.time);
+              if (isNaN(punchDate.getTime())) continue;
+
+              let verificationMode = "FINGERPRINT";
+              if (ev.minor === 75) verificationMode = "FACE_SCAN";
+              else if (ev.minor === 38) verificationMode = "FINGERPRINT";
+              else if (ev.minor === 1) verificationMode = "CARD";
+              else if (ev.minor === 104) verificationMode = "FACE_SCAN";
+
+              const userRec = await prisma.user.findFirst({
+                where: {
+                  organizationId,
+                  OR: [
+                    { employeeId: rawEmp },
+                    { employeeId: { endsWith: rawEmp } },
+                    { employeeId: { endsWith: rawEmp.replace(/^0+/, "") } },
+                  ],
+                },
+              });
+
+              if (!userRec) continue;
+
+              const existingLog = await prisma.biometricRawLog.findFirst({
+                where: {
+                  organizationId,
+                  employeeId: userRec.employeeId,
+                  punchTime: punchDate,
+                },
+              });
+
+              if (!existingLog) {
+                await prisma.biometricRawLog.create({
+                  data: {
+                    organizationId,
+                    deviceId: device.id,
+                    deviceSerialNumber: device.deviceSerialNumber,
+                    employeeId: userRec.employeeId,
+                    punchTime: punchDate,
+                    punchType: "CHECK_IN",
+                    verificationMode,
+                    syncStatus: "PROCESSED",
+                  },
+                });
+
+                const utcMidnight = new Date(
+                  Date.UTC(punchDate.getUTCFullYear(), punchDate.getUTCMonth(), punchDate.getUTCDate())
+                );
+
+                const existingAtt = await prisma.attendance.findUnique({
+                  where: {
+                    userId_date: {
+                      userId: userRec.id,
+                      date: utcMidnight,
+                    },
+                  },
+                });
+
+                if (!existingAtt) {
+                  await prisma.attendance.create({
+                    data: {
+                      organizationId,
+                      userId: userRec.id,
+                      date: utcMidnight,
+                      checkInTime: punchDate,
+                      currentState: "CHECKED_IN",
+                      status: "PRESENT",
+                      ipAddress: device.ipAddress,
+                      punchInDeviceType: "BIOMETRIC_TERMINAL",
+                      punchInAddress: device.locationName,
+                    },
+                  });
+                }
+              }
+            }
+          }
         } catch (err) {
-          console.warn("Could not fetch live terminal users:", err.message);
+          console.warn("Could not fetch live terminal users/punches:", err.message);
         }
       }
+
+      // Fetch refreshed recent raw punches from this device
+      const recentLogs = await prisma.biometricRawLog.findMany({
+        where: {
+          organizationId,
+          deviceSerialNumber: device.deviceSerialNumber,
+        },
+        orderBy: { punchTime: "desc" },
+        take: 30,
+      });
 
       return res.status(200).json({
         device,
@@ -543,6 +754,278 @@ function createDevicesRouter(prisma) {
         recentLogs,
       });
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/devices/:id/sync-punches (Directly pull AcsEvents from Hikvision and record attendance)
+  router.post("/:id/sync-punches", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+
+      if (!device || !device.ipAddress) {
+        return res.status(404).json({ message: "Device not found or IP not configured." });
+      }
+
+      const user = device.username || "admin";
+      const pass = device.password || "";
+      const host = device.ipAddress;
+      const path = "/ISAPI/AccessControl/AcsEvent?format=json";
+
+      // 1. Probe total matches first
+      const probeBody = JSON.stringify({
+        AcsEventCond: {
+          searchID: "1",
+          searchResultPosition: 0,
+          maxResults: 1,
+          major: 0,
+          minor: 0,
+        },
+      });
+
+      const totalMatches = await new Promise((resolve, reject) => {
+        const req1 = https.request(
+          {
+            hostname: host,
+            port: 443,
+            path,
+            method: "POST",
+            rejectUnauthorized: false,
+            timeout: 5000,
+            headers: { "Content-Type": "application/json", "Content-Length": 0 },
+          },
+          (res1) => {
+            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+              const auth = res1.headers["www-authenticate"];
+              const digest = buildDigestHeader("POST", path, user, pass, auth);
+              const req2 = https.request(
+                {
+                  hostname: host,
+                  port: 443,
+                  path,
+                  method: "POST",
+                  rejectUnauthorized: false,
+                  timeout: 6000,
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Content-Length": Buffer.byteLength(probeBody),
+                    Authorization: digest,
+                  },
+                },
+                (res2) => {
+                  let buf = "";
+                  res2.on("data", (c) => (buf += c));
+                  res2.on("end", () => {
+                    try {
+                      const parsed = JSON.parse(buf);
+                      resolve(Number(parsed.AcsEvent?.totalMatches || 0));
+                    } catch (e) {
+                      resolve(0);
+                    }
+                  });
+                }
+              );
+              req2.on("error", reject);
+              req2.write(probeBody);
+              req2.end();
+            } else {
+              resolve(0);
+            }
+          }
+        );
+        req1.on("error", reject);
+        req1.end();
+      });
+
+      if (totalMatches === 0) {
+        return res.status(200).json({ success: true, pulledCount: 0, message: "No event logs found on machine." });
+      }
+
+      // 2. Fetch the most recent 100 events from machine
+      const fetchStartPos = Math.max(0, totalMatches - 100);
+      const fetchBody = JSON.stringify({
+        AcsEventCond: {
+          searchID: "2",
+          searchResultPosition: fetchStartPos,
+          maxResults: 100,
+          major: 0,
+          minor: 0,
+        },
+      });
+
+      const eventsList = await new Promise((resolve, reject) => {
+        const req1 = https.request(
+          {
+            hostname: host,
+            port: 443,
+            path,
+            method: "POST",
+            rejectUnauthorized: false,
+            timeout: 5000,
+            headers: { "Content-Type": "application/json", "Content-Length": 0 },
+          },
+          (res1) => {
+            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+              const auth = res1.headers["www-authenticate"];
+              const digest = buildDigestHeader("POST", path, user, pass, auth);
+              const req2 = https.request(
+                {
+                  hostname: host,
+                  port: 443,
+                  path,
+                  method: "POST",
+                  rejectUnauthorized: false,
+                  timeout: 8000,
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Content-Length": Buffer.byteLength(fetchBody),
+                    Authorization: digest,
+                  },
+                },
+                (res2) => {
+                  let buf = "";
+                  res2.on("data", (c) => (buf += c));
+                  res2.on("end", () => {
+                    try {
+                      const parsed = JSON.parse(buf);
+                      resolve(parsed.AcsEvent?.InfoList || []);
+                    } catch (e) {
+                      resolve([]);
+                    }
+                  });
+                }
+              );
+              req2.on("error", reject);
+              req2.write(fetchBody);
+              req2.end();
+            } else {
+              resolve([]);
+            }
+          }
+        );
+        req1.on("error", reject);
+        req1.end();
+      });
+
+      // Filter events that belong to persons (major: 5, with employeeNoString)
+      const personEvents = eventsList.filter(
+        (e) => e.major === 5 && (e.minor === 75 || e.minor === 38 || e.minor === 104 || e.minor === 1) && e.employeeNoString
+      );
+
+      let recordedCount = 0;
+      let attendanceCreatedCount = 0;
+
+      for (const ev of personEvents) {
+        const rawEmp = String(ev.employeeNoString).trim();
+        const punchDate = new Date(ev.time);
+        if (isNaN(punchDate.getTime())) continue;
+
+        // Minor codes: 75=Face, 38=Fingerprint, 1=Card, 104=Face/FP
+        let verificationMode = "FINGERPRINT";
+        if (ev.minor === 75) verificationMode = "FACE_SCAN";
+        else if (ev.minor === 38) verificationMode = "FINGERPRINT";
+        else if (ev.minor === 1) verificationMode = "CARD";
+        else if (ev.minor === 104) verificationMode = "FACE_SCAN";
+
+        // Find user by employeeId matching
+        const userRec = await prisma.user.findFirst({
+          where: {
+            organizationId,
+            OR: [
+              { employeeId: rawEmp },
+              { employeeId: { endsWith: rawEmp } },
+              { employeeId: { endsWith: rawEmp.replace(/^0+/, "") } },
+            ],
+          },
+        });
+
+        if (!userRec) continue;
+
+        // Check if raw log already exists within 60s of punchTime for this user & serial
+        const existingLog = await prisma.biometricRawLog.findFirst({
+          where: {
+            organizationId,
+            employeeId: userRec.employeeId,
+            punchTime: {
+              gte: new Date(punchDate.getTime() - 60000),
+              lte: new Date(punchDate.getTime() + 60000),
+            },
+          },
+        });
+
+        if (!existingLog) {
+          await prisma.biometricRawLog.create({
+            data: {
+              organizationId,
+              deviceId: device.id,
+              deviceSerialNumber: device.deviceSerialNumber,
+              employeeId: userRec.employeeId,
+              punchTime: punchDate,
+              punchType: "CHECK_IN",
+              verificationMode,
+              syncStatus: "PROCESSED",
+            },
+          });
+          recordedCount++;
+        }
+
+        // Attendance processing: First punch of the day = checkInTime
+        const utcMidnight = new Date(
+          Date.UTC(punchDate.getUTCFullYear(), punchDate.getUTCMonth(), punchDate.getUTCDate())
+        );
+
+        const existingAtt = await prisma.attendance.findUnique({
+          where: {
+            userId_date: {
+              userId: userRec.id,
+              date: utcMidnight,
+            },
+          },
+        });
+
+        if (!existingAtt) {
+          // First face/fingerprint of the day -> Check in!
+          await prisma.attendance.create({
+            data: {
+              organizationId,
+              userId: userRec.id,
+              date: utcMidnight,
+              checkInTime: punchDate,
+              currentState: "CHECKED_IN",
+              status: "PRESENT",
+              ipAddress: device.ipAddress,
+              punchInDeviceType: "BIOMETRIC_TERMINAL",
+              punchInAddress: device.locationName,
+            },
+          });
+          attendanceCreatedCount++;
+        }
+      }
+
+      // Update device sync counter
+      await prisma.biometricDevice.update({
+        where: { id: device.id },
+        data: {
+          lastHeartbeat: new Date(),
+          totalLogsSynced: { increment: recordedCount },
+          status: "ONLINE",
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        totalEventsExamined: personEvents.length,
+        recordedPunches: recordedCount,
+        attendanceCheckIns: attendanceCreatedCount,
+        message: `Pulled ${personEvents.length} verification events from machine. Saved ${recordedCount} new punches and logged ${attendanceCreatedCount} check-in(s).`,
+      });
+    } catch (err) {
+      console.error("Sync punches error:", err.message);
       next(err);
     }
   });
