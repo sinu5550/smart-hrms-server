@@ -1,8 +1,265 @@
 const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
+const https = require("https");
 const multer = require("multer");
 const { authenticateToken, requireRoles } = require("../middleware");
+
+// Helper to push/update employee on all active Hikvision biometric terminals
+async function syncEmployeeToHikvisionDevices(prisma, organizationId, employee) {
+  if (!employee || !employee.fullName) return;
+  try {
+    const devices = await prisma.biometricDevice.findMany({
+      where: { organizationId, status: "ONLINE" },
+    });
+    if (!devices.length) return;
+
+    // Hikvision does NOT accept dashes in terminal IDs.
+    // Strip all hyphens from employeeId: EKH-26-0018 -> EKH260018 (never just '18')
+    const terminalEmployeeNo = String(employee.employeeId || "").trim().replace(/-/g, "");
+
+    const path = "/ISAPI/AccessControl/UserInfo/SetUp?format=json";
+    const setupPayload = JSON.stringify({
+      UserInfo: {
+        employeeNo: terminalEmployeeNo,
+        name: employee.fullName.slice(0, 32).trim(),
+        userType: "normal",
+        Valid: {
+          enable: true,
+          beginTime: "2026-01-01T00:00:00",
+          endTime: "2036-12-31T23:59:59",
+          timeType: "local",
+        },
+        doorRight: "1",
+        RightPlan: [{ doorNo: 1, planTemplateNo: "1" }],
+      },
+    });
+
+    for (const dev of devices) {
+      if (!dev.ipAddress) continue;
+      const host = dev.ipAddress;
+      const user = dev.username || "admin";
+      const pass = dev.password || "";
+
+      new Promise((resolve, reject) => {
+        const req1 = https.request(
+          {
+            hostname: host,
+            port: 443,
+            path,
+            method: "PUT",
+            rejectUnauthorized: false,
+            timeout: 5000,
+            headers: { "Content-Type": "application/json", "Content-Length": 0 },
+          },
+          (res1) => {
+            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+              const authHeader = res1.headers["www-authenticate"];
+              const parts = {};
+              authHeader.replace(/^Digest\s+/, "").split(/,\s*/).forEach((p) => {
+                const idx = p.indexOf("=");
+                if (idx !== -1) parts[p.slice(0, idx).trim()] = p.slice(idx + 1).replace(/"/g, "").trim();
+              });
+              const realm = parts.realm || "";
+              const nonce = parts.nonce || "";
+              const qop = parts.qop || "";
+              const cnonce = crypto.randomBytes(8).toString("hex");
+              const nc = "00000001";
+              const ha1 = crypto.createHash("md5").update(`${user}:${realm}:${pass}`).digest("hex");
+              const ha2 = crypto.createHash("md5").update(`PUT:${path}`).digest("hex");
+              const digest = qop.includes("auth")
+                ? `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", qop=auth, nc=${nc}, cnonce="${cnonce}", response="${crypto.createHash("md5").update(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`).digest("hex")}"`
+                : `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", response="${crypto.createHash("md5").update(`${ha1}:${nonce}:${ha2}`).digest("hex")}"`;
+
+              const req2 = https.request(
+                {
+                  hostname: host,
+                  port: 443,
+                  path,
+                  method: "PUT",
+                  rejectUnauthorized: false,
+                  timeout: 5000,
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Content-Length": Buffer.byteLength(setupPayload),
+                    Authorization: digest,
+                  },
+                },
+                (res2) => {
+                  resolve(res2.statusCode);
+                }
+              );
+              req2.on("error", resolve);
+              req2.write(setupPayload);
+              req2.end();
+            } else {
+              resolve(res1.statusCode);
+            }
+          }
+        );
+        req1.on("error", resolve);
+        req1.end();
+      }).catch((e) => console.warn(`Hikvision auto-sync skipped for ${dev.deviceName}:`, e.message));
+    }
+  } catch (err) {
+    console.warn("syncEmployeeToHikvisionDevices error:", err.message);
+  }
+}
+
+// Helper to push employee face picture to all active Hikvision biometric terminals
+async function pushFaceToHikvisionDevices(prisma, organizationId, employee, imageBuffer) {
+  if (!employee || !employee.employeeId || !imageBuffer) return;
+  try {
+    const devices = await prisma.biometricDevice.findMany({
+      where: { organizationId, status: "ONLINE" },
+    });
+    if (!devices.length) return;
+
+    // Hikvision does NOT accept dashes in terminal IDs.
+    // Strip all hyphens from employeeId: EKH-26-0018 -> EKH260018 (never just '18')
+    const terminalEmployeeNo = String(employee.employeeId || "").trim().replace(/-/g, "");
+
+    const path = "/ISAPI/Intelligent/FDLib/FDSetUp?format=json";
+    const boundary = "----WebKitFormBoundary" + crypto.randomBytes(16).toString("hex");
+    const jsonMetadata = JSON.stringify({
+      faceLibType: "blackFD",
+      FDID: "1",
+      FPID: terminalEmployeeNo,
+    });
+
+    const head =
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="FaceDataRecord"\r\n` +
+      `Content-Type: application/json\r\n` +
+      `Content-Length: ${Buffer.byteLength(jsonMetadata)}\r\n\r\n` +
+      `${jsonMetadata}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="img"; filename="face.jpg"\r\n` +
+      `Content-Type: image/jpeg\r\n` +
+      `Content-Length: ${imageBuffer.length}\r\n\r\n`;
+
+    const tail = `\r\n--${boundary}--\r\n`;
+    const multipartBody = Buffer.concat([
+      Buffer.from(head, "utf-8"),
+      imageBuffer,
+      Buffer.from(tail, "utf-8"),
+    ]);
+
+    for (const dev of devices) {
+      if (!dev.ipAddress) continue;
+      const host = dev.ipAddress;
+      const user = dev.username || "admin";
+      const pass = dev.password || "";
+
+      new Promise((resolve) => {
+        const req1 = https.request(
+          {
+            hostname: host,
+            port: 443,
+            path,
+            method: "PUT",
+            rejectUnauthorized: false,
+            timeout: 7000,
+            headers: {
+              "Content-Type": `multipart/form-data; boundary=${boundary}`,
+              "Content-Length": 0,
+            },
+          },
+          (res1) => {
+            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+              const authHeader = res1.headers["www-authenticate"];
+              const parts = {};
+              authHeader
+                .replace(/^Digest\s+/, "")
+                .split(/,\s*/)
+                .forEach((p) => {
+                  const idx = p.indexOf("=");
+                  if (idx !== -1)
+                    parts[p.slice(0, idx).trim()] = p
+                      .slice(idx + 1)
+                      .replace(/"/g, "")
+                      .trim();
+                });
+              const realm = parts.realm || "";
+              const nonce = parts.nonce || "";
+              const qop = parts.qop || "";
+              const cnonce = crypto.randomBytes(8).toString("hex");
+              const nc = "00000001";
+              const ha1 = crypto
+                .createHash("md5")
+                .update(`${user}:${realm}:${pass}`)
+                .digest("hex");
+              const ha2 = crypto
+                .createHash("md5")
+                .update(`PUT:${path}`)
+                .digest("hex");
+              const digest = qop.includes("auth")
+                ? `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", qop=auth, nc=${nc}, cnonce="${cnonce}", response="${crypto
+                    .createHash("md5")
+                    .update(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`)
+                    .digest("hex")}"`
+                : `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", response="${crypto
+                    .createHash("md5")
+                    .update(`${ha1}:${nonce}:${ha2}`)
+                    .digest("hex")}"`;
+
+              const req2 = https.request(
+                {
+                  hostname: host,
+                  port: 443,
+                  path,
+                  method: "PUT",
+                  rejectUnauthorized: false,
+                  timeout: 8000,
+                  headers: {
+                    "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                    "Content-Length": multipartBody.length,
+                    Authorization: digest,
+                  },
+                },
+                (res2) => {
+                  let b = "";
+                  res2.on("data", (c) => (b += c));
+                  res2.on("end", async () => {
+                    if (res2.statusCode === 200) {
+                      try {
+                        const cur = await prisma.user.findUnique({
+                          where: { id: employee.id },
+                          select: { permissions: true },
+                        });
+                        const perms = Array.isArray(cur?.permissions) ? cur.permissions : [];
+                        if (!perms.includes("bio:face")) {
+                          await prisma.user.update({
+                            where: { id: employee.id },
+                            data: { permissions: [...perms, "bio:face"] },
+                          });
+                        }
+                      } catch (dbErr) {
+                        console.warn("DB bio:face permission update warning:", dbErr.message);
+                      }
+                    }
+                    resolve({ statusCode: res2.statusCode, data: b });
+                  });
+                }
+              );
+              req2.on("error", resolve);
+              req2.write(multipartBody);
+              req2.end();
+            } else {
+              resolve({ statusCode: res1.statusCode });
+            }
+          }
+        );
+        req1.on("error", resolve);
+        req1.end();
+      }).catch((e) =>
+        console.warn(`Face upload to Hikvision skipped for ${dev.deviceName}:`, e.message)
+      );
+    }
+  } catch (err) {
+    console.warn("pushFaceToHikvisionDevices error:", err.message);
+  }
+}
 
 const upload = multer({
   limits: { fileSize: 3 * 1024 * 1024 },
@@ -309,6 +566,11 @@ function createEmployeesRouter(prisma) {
         },
       });
 
+      // Auto-sync new employee to all active Hikvision devices
+      syncEmployeeToHikvisionDevices(prisma, organizationId, user).catch((err) =>
+        console.warn("Auto-sync to Hikvision on create failed:", err.message)
+      );
+
       return res.status(201).json({
         user,
         initialTemporaryPassword: initialPassword,
@@ -424,6 +686,16 @@ function createEmployeesRouter(prisma) {
         }
       }
 
+      const trimmedEmpId = dto.employeeId?.trim();
+      if (trimmedEmpId && trimmedEmpId !== user.employeeId) {
+        const idCollision = await prisma.user.findFirst({
+          where: { organizationId, employeeId: trimmedEmpId },
+        });
+        if (idCollision && idCollision.id !== id) {
+          return res.status(409).json({ message: `Employee ID "${trimmedEmpId}" is already assigned to another employee.` });
+        }
+      }
+
       if (dto.phone && dto.phone !== user.phone) {
         const phoneCollision = await prisma.user.findFirst({ where: { organizationId, phone: dto.phone } });
         if (phoneCollision && phoneCollision.id !== id) {
@@ -442,6 +714,7 @@ function createEmployeesRouter(prisma) {
       const updated = await prisma.user.update({
         where: { id },
         data: {
+          employeeId: trimmedEmpId || undefined,
           fullName: dto.fullName,
           email: normalizedEmail,
           phone: dto.phone,
@@ -481,6 +754,24 @@ function createEmployeesRouter(prisma) {
           updatedAt: true,
         },
       });
+
+      // Auto-sync updated employee details to all active Hikvision devices
+      syncEmployeeToHikvisionDevices(prisma, organizationId, updated).catch((err) =>
+        console.warn("Auto-sync to Hikvision on update failed:", err.message)
+      );
+
+      // If avatarUrl was modified/provided, download and push face to terminal
+      if (dto.avatarUrl && dto.avatarUrl.startsWith("http")) {
+        fetch(dto.avatarUrl)
+          .then((r) => (r.ok ? r.arrayBuffer() : null))
+          .then((ab) => {
+            if (ab) {
+              const buf = Buffer.from(ab);
+              return pushFaceToHikvisionDevices(prisma, organizationId, updated, buf);
+            }
+          })
+          .catch((err) => console.warn("Syncing updated avatarUrl to Hikvision failed:", err.message));
+      }
 
       return res.status(200).json(updated);
     } catch (err) {
@@ -560,23 +851,17 @@ function createEmployeesRouter(prisma) {
         });
       }
 
-      const deleted = await prisma.user.update({
+      // Hard delete employee record permanently from database
+      await prisma.user.delete({
         where: { id },
-        data: {
-          isDeleted: true,
-          deletedAt: new Date(),
-          status: "TERMINATED",
-          refreshTokenHash: null,
-        },
-        select: {
-          id: true,
-          employeeId: true,
-          isDeleted: true,
-          deletedAt: true,
-        },
       });
 
-      return res.status(200).json(deleted);
+      return res.status(200).json({
+        id,
+        employeeId: user.employeeId,
+        deleted: true,
+        message: `Employee ${user.fullName} (${user.employeeId}) permanently deleted from database.`,
+      });
     } catch (err) {
       next(err);
     }
@@ -621,8 +906,15 @@ function createEmployeesRouter(prisma) {
       const updated = await prisma.user.update({
         where: { id },
         data: { avatarUrl: data.secure_url },
-        select: { id: true, employeeId: true, avatarUrl: true },
+        select: { id: true, employeeId: true, fullName: true, avatarUrl: true },
       });
+
+      // Auto-push the uploaded face image to all active Hikvision devices
+      if (req.file?.buffer) {
+        pushFaceToHikvisionDevices(prisma, organizationId, updated, req.file.buffer).catch((err) =>
+          console.warn("Auto-push face to Hikvision failed:", err.message)
+        );
+      }
 
       return res.status(200).json(updated);
     } catch (err) {
@@ -730,23 +1022,18 @@ function createEmployeesRouter(prisma) {
 
       const validIds = targetUsers.map((u) => u.id);
 
-      const result = await prisma.user.updateMany({
+      // Hard delete selected employee records permanently from database
+      const result = await prisma.user.deleteMany({
         where: {
           id: { in: validIds },
           organizationId,
-        },
-        data: {
-          isDeleted: true,
-          deletedAt: new Date(),
-          status: "TERMINATED",
-          refreshTokenHash: null,
         },
       });
 
       return res.status(200).json({
         success: true,
         deletedCount: result.count,
-        message: `Successfully deleted ${result.count} employee(s).`,
+        message: `Successfully and permanently deleted ${result.count} employee(s) from database.`,
       });
     } catch (err) {
       next(err);

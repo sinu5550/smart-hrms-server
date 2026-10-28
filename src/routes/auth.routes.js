@@ -328,6 +328,40 @@ function createAuthRouter(prisma) {
     }
   });
 
+  // PUT /api/auth/profile
+  router.put("/profile", authenticateToken, async (req, res, next) => {
+    try {
+      const { fullName, phone } = req.body || {};
+      if (!fullName || typeof fullName !== "string" || !fullName.trim()) {
+        return res.status(400).json({ message: "Full name is required." });
+      }
+
+      const updated = await prisma.user.update({
+        where: { id: req.user.userId },
+        data: {
+          fullName: fullName.trim(),
+          phone: phone ? String(phone).trim() : null,
+        },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          role: true,
+          organizationId: true,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Profile updated successfully.",
+        user: updated,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // POST /api/auth/change-password
   router.post("/change-password", authenticateToken, async (req, res, next) => {
     try {
