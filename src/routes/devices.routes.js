@@ -285,6 +285,50 @@ function createDevicesRouter(prisma) {
     }
   }
 
+  // Calculate Overtime Minutes based on user's shift settings and punch-out time
+  async function determineOvertimeMinutes(organizationId, userId, checkOutDate) {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { shiftId: true },
+      });
+
+      let setting = user?.shiftId
+        ? await prisma.officeSetting.findUnique({ where: { id: user.shiftId } })
+        : null;
+
+      if (!setting) {
+        setting = await prisma.officeSetting.findFirst({
+          where: { organizationId, isDefault: true },
+        });
+      }
+
+      if (!setting) {
+        setting = await prisma.officeSetting.findFirst({
+          where: { organizationId },
+        });
+      }
+
+      const endTimeStr = setting?.endTime || "18:00";
+      const thresholdMins = typeof setting?.overtimeThresholdMins === "number" ? setting.overtimeThresholdMins : 30;
+      const [endHour, endMinute] = endTimeStr.split(":").map(Number);
+
+      // Convert checkOutDate to local hours/minutes (+06:00)
+      const localCheckOut = new Date(checkOutDate.getTime() + 6 * 60 * 60 * 1000);
+      const checkOutMins = localCheckOut.getUTCHours() * 60 + localCheckOut.getUTCMinutes();
+      const shiftEndMins = endHour * 60 + endMinute;
+
+      // Overtime counts only if checkOutMins >= shiftEndMins + thresholdMins
+      if (checkOutMins >= shiftEndMins + thresholdMins) {
+        return checkOutMins - shiftEndMins;
+      }
+      return 0;
+    } catch (e) {
+      console.warn("determineOvertimeMinutes notice:", e.message);
+      return 0;
+    }
+  }
+
   // GET /api/devices/:id/portal (Live terminal diagnostic & registered persons view)
   router.post("/:id/sync-persons", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
     try {
@@ -1665,6 +1709,7 @@ function createDevicesRouter(prisma) {
             Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))
           );
           const totalWorkMinutes = Math.max(0, elapsedMinutes - (existingAtt.totalBreakMinutes || 0));
+          const overtimeMinutes = await determineOvertimeMinutes(organizationId, userRec.id, punchDate);
 
           await prisma.attendance.update({
             where: { id: existingAtt.id },
@@ -1672,6 +1717,7 @@ function createDevicesRouter(prisma) {
               checkOutTime: punchDate,
               currentState: "CHECKED_OUT",
               totalWorkMinutes,
+              overtimeMinutes,
               punchOutAddress: device.locationName,
             },
           });
@@ -1882,6 +1928,7 @@ function createDevicesRouter(prisma) {
           0,
           elapsedMinutes - existingAttendance.totalBreakMinutes
         );
+        const overtimeMinutes = await determineOvertimeMinutes(device.organizationId, user.id, punchDate);
 
         await prisma.attendance.update({
           where: { id: existingAttendance.id },
@@ -1889,6 +1936,7 @@ function createDevicesRouter(prisma) {
             checkOutTime: punchDate,
             currentState: "CHECKED_OUT",
             totalWorkMinutes,
+            overtimeMinutes,
             punchOutAddress: device.locationName,
           },
         });
@@ -2186,6 +2234,7 @@ function createDevicesRouter(prisma) {
               Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))
             );
             const totalWorkMinutes = Math.max(0, elapsedMinutes - (existingAtt.totalBreakMinutes || 0));
+            const overtimeMinutes = await determineOvertimeMinutes(dev.organizationId, userRec.id, punchDate);
 
             await prisma.attendance.update({
               where: { id: existingAtt.id },
@@ -2193,6 +2242,7 @@ function createDevicesRouter(prisma) {
                 checkOutTime: punchDate,
                 currentState: "CHECKED_OUT",
                 totalWorkMinutes,
+                overtimeMinutes,
                 punchOutAddress: dev.locationName,
               },
             });

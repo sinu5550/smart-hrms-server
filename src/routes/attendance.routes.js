@@ -39,6 +39,50 @@ function createAttendanceRouter(prisma) {
     return "PRESENT";
   }
 
+  // Calculate Overtime Minutes based on user's shift settings and check-out time
+  async function calculateOvertimeMinutes(organizationId, userId, checkOutDate) {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { shiftId: true },
+      });
+
+      let setting = user?.shiftId
+        ? await prisma.officeSetting.findUnique({ where: { id: user.shiftId } })
+        : null;
+
+      if (!setting) {
+        setting = await prisma.officeSetting.findFirst({
+          where: { organizationId, isDefault: true },
+        });
+      }
+
+      if (!setting) {
+        setting = await prisma.officeSetting.findFirst({
+          where: { organizationId },
+        });
+      }
+
+      const endTimeStr = setting?.endTime || "18:00";
+      const thresholdMins = typeof setting?.overtimeThresholdMins === "number" ? setting.overtimeThresholdMins : 30;
+      const [endHour, endMinute] = endTimeStr.split(":").map(Number);
+
+      // Local Bangladesh time offset +06:00
+      const localCheckOut = new Date(checkOutDate.getTime() + 6 * 60 * 60 * 1000);
+      const checkOutMins = localCheckOut.getUTCHours() * 60 + localCheckOut.getUTCMinutes();
+      const shiftEndMins = endHour * 60 + endMinute;
+
+      // Overtime counts only if checkOutMins >= shiftEndMins + thresholdMins
+      if (checkOutMins >= shiftEndMins + thresholdMins) {
+        return checkOutMins - shiftEndMins;
+      }
+      return 0;
+    } catch (e) {
+      console.warn("calculateOvertimeMinutes notice:", e.message);
+      return 0;
+    }
+  }
+
   // All attendance endpoints require authentication
   router.use(authenticateToken);
 
@@ -351,6 +395,11 @@ function createAttendanceRouter(prisma) {
             Math.round((now.getTime() - attendance.checkInTime.getTime()) / (1000 * 60))
           );
           const totalWorkMinutes = Math.max(0, elapsedTotalMinutes - attendance.totalBreakMinutes);
+          const overtimeMinutes = await calculateOvertimeMinutes(
+            req.user.organizationId,
+            req.user.userId,
+            now
+          );
 
           return tx.attendance.update({
             where: { id: attendance.id },
@@ -358,6 +407,7 @@ function createAttendanceRouter(prisma) {
               checkOutTime: now,
               currentState: "CHECKED_OUT",
               totalWorkMinutes,
+              overtimeMinutes,
               punchOutLatitude: dto.latitude || null,
               punchOutLongitude: dto.longitude || null,
               punchOutAddress: dto.address || null,

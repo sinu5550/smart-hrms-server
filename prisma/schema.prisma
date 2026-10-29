@@ -219,6 +219,7 @@ model Attendance {
   currentState      AttendanceSessionState @default(CHECKED_IN) @map("current_state")
   totalWorkMinutes  Int                    @default(0) @map("total_work_minutes")
   totalBreakMinutes Int                    @default(0) @map("total_break_minutes")
+  overtimeMinutes   Int                    @default(0) @map("overtime_minutes")
   status            AttendanceStatus       @default(PRESENT)
   ipAddress         String                 @map("ip_address")
   punchInLatitude   Float?                 @map("punch_in_latitude")
@@ -369,8 +370,9 @@ model OfficeSetting {
   shiftName          String        @default("Regular Shift") @map("shift_name")
   startTime          String        @default("09:00") @map("start_time") // HH:mm format, for example "09:00".
   endTime            String        @default("18:00") @map("end_time") // HH:mm format, for example "18:00".
-  gracePeriodMinutes Int           @default(30) @map("grace_period_minutes") // Grace period in minutes, for example through 09:30.
-  isDefault          Boolean       @default(true) @map("is_default")
+  gracePeriodMinutes    Int           @default(30) @map("grace_period_minutes") // Grace period in minutes, for example through 09:30.
+  overtimeThresholdMins Int           @default(30) @map("overtime_threshold_mins") // Overtime buffer in minutes after shift end, default 30.
+  isDefault             Boolean       @default(true) @map("is_default")
   updatedAt          DateTime      @updatedAt @map("updated_at")
   Organization       Organization? @relation(fields: [organizationId], references: [id])
   users              User[]

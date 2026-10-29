@@ -83,6 +83,7 @@ apiRouter.use("/departments", createDepartmentsRouter(prisma));
 apiRouter.use("/organizations", createOrganizationsRouter(prisma));
 apiRouter.use("/roles", createRolesRouter(prisma));
 apiRouter.use("/shifts", createSettingsRouter(prisma));
+apiRouter.use("/settings", createSettingsRouter(prisma));
 apiRouter.use("/devices", createDevicesRouter(prisma));
 apiRouter.use("/core-hr", createCoreHrRouter(prisma));
 apiRouter.use("/outwork", createOutworkRouter(prisma));
