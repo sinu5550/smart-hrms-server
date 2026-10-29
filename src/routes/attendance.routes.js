@@ -524,7 +524,7 @@ function createAttendanceRouter(prisma) {
               email: true,
               avatarUrl: true,
               department: { select: { id: true, name: true } },
-              designation: { select: { id: true, title: true } },
+              designation: { select: { id: true, name: true } },
             },
           },
           breaks: {
