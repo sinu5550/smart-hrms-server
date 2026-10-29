@@ -477,7 +477,7 @@ function createAttendanceRouter(prisma) {
   // GET /api/attendance/admin/by-date
   router.get("/admin/by-date", requireRoles("HR", "ADMIN"), async (req, res, next) => {
     try {
-      const { date, startDate, endDate } = req.query;
+      const { date, startDate, endDate, userId } = req.query;
       if (!date && !startDate) {
         return res.status(400).json({ message: "Date or startDate query parameter is required." });
       }
@@ -506,6 +506,7 @@ function createAttendanceRouter(prisma) {
         where: {
           organizationId: req.user.organizationId,
           date: dateFilter,
+          ...(userId && userId !== "ALL" ? { userId } : {}),
           ...(ownerEmail
             ? {
                 user: {
@@ -522,7 +523,8 @@ function createAttendanceRouter(prisma) {
               fullName: true,
               email: true,
               avatarUrl: true,
-              department: { select: { name: true } },
+              department: { select: { id: true, name: true } },
+              designation: { select: { id: true, title: true } },
             },
           },
           breaks: {
