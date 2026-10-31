@@ -639,8 +639,8 @@ function createAttendanceRouter(prisma) {
         where: {
           organizationId,
           status: "APPROVED",
-          startDate: { lte: endD },
-          endDate: { gte: startD },
+          startDate: { lte: endUtc },
+          endDate: { gte: startUtc },
         },
         select: {
           userId: true,
