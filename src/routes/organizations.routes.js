@@ -434,6 +434,197 @@ function createOrganizationsRouter(prisma) {
     }
   });
 
+  // ==========================================
+  // EMPLOYEE SELF-REGISTRATION FORMS & SUBMISSIONS
+  // ==========================================
+
+  // 1. GET /api/organizations/public-form/:tenantSlug
+  // Public endpoint for applicants to get basic org info, departments & designations
+  router.get("/public-form/:tenantSlug", async (req, res, next) => {
+    try {
+      const { tenantSlug } = req.params;
+      const org = await prisma.organization.findFirst({
+        where: {
+          OR: [{ slug: tenantSlug }, { id: tenantSlug }],
+        },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          logoUrl: true,
+          address: true,
+          employeePrefix: true,
+          departments: {
+            select: { id: true, name: true, code: true },
+            orderBy: { name: "asc" },
+          },
+          designations: {
+            select: { id: true, name: true, code: true },
+            orderBy: { name: "asc" },
+          },
+        },
+      });
+
+      if (!org) {
+        return res.status(404).json({ message: "Organization registration form not found or inactive." });
+      }
+
+      return res.status(200).json({ organization: org });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // 2. POST /api/organizations/public-form/:tenantSlug/submit
+  // Public endpoint for prospective employees to submit their details
+  router.post("/public-form/:tenantSlug/submit", async (req, res, next) => {
+    try {
+      const { tenantSlug } = req.params;
+      const dto = req.body || {};
+
+      const org = await prisma.organization.findFirst({
+        where: {
+          OR: [{ slug: tenantSlug }, { id: tenantSlug }],
+        },
+        select: { id: true },
+      });
+
+      if (!org) {
+        return res.status(404).json({ message: "Organization registration form not found." });
+      }
+
+      const fullName = (dto.fullName || "").trim();
+      const email = (dto.email || "").trim().toLowerCase();
+      const phone = (dto.phone || "").trim();
+
+      if (!fullName) {
+        return res.status(400).json({ message: "Full Name is required." });
+      }
+      if (!email || !email.includes("@")) {
+        return res.status(400).json({ message: "A valid Email address is required." });
+      }
+
+      // Check if user already exists as active employee
+      const existingUser = await prisma.user.findFirst({
+        where: {
+          organizationId: org.id,
+          OR: [
+            { email },
+            ...(phone ? [{ phone }] : []),
+          ],
+        },
+      });
+
+      if (existingUser) {
+        return res.status(409).json({ message: "An employee with this email or phone is already enlisted." });
+      }
+
+      const registration = await prisma.employeeRegistration.create({
+        data: {
+          organizationId: org.id,
+          fullName,
+          email,
+          phone: phone || null,
+          nidOrPassport: dto.nidOrPassport || null,
+          dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : null,
+          gender: dto.gender || null,
+          bloodGroup: dto.bloodGroup || null,
+          presentAddress: dto.presentAddress || null,
+          permanentAddress: dto.permanentAddress || null,
+          emergencyContactName: dto.emergencyContactName || null,
+          emergencyContactPhone: dto.emergencyContactPhone || null,
+          emergencyContactRelation: dto.emergencyContactRelation || null,
+          departmentId: dto.departmentId || null,
+          designationId: dto.designationId || null,
+          avatarUrl: dto.avatarUrl || null,
+          status: "PENDING",
+        },
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: "Registration submitted successfully! HR will review and provision your employee account.",
+        registrationId: registration.id,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // 3. GET /api/organizations/registrations
+  // Protected endpoint for Owner / Authorized HR to view pending employee registrations
+  router.get("/registrations", authenticateToken, async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const userRole = req.user.role;
+      const userPerms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
+      const isOwner = userRole === "OWNER" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
+      const canManage = isOwner || userRole === "ADMIN" || userRole === "HR" || userPerms.includes("employees.create") || userPerms.includes("employees.registration");
+
+      if (!canManage) {
+        return res.status(403).json({ message: "You do not have permission to view employee registrations." });
+      }
+
+      const { status } = req.query;
+      const whereClause = { organizationId };
+      if (status) {
+        whereClause.status = status;
+      }
+
+      const list = await prisma.employeeRegistration.findMany({
+        where: whereClause,
+        orderBy: { createdAt: "desc" },
+      });
+
+      // Enrich with department and designation names
+      const [departments, designations] = await Promise.all([
+        prisma.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
+        prisma.designation.findMany({ where: { organizationId }, select: { id: true, name: true } }),
+      ]);
+
+      const deptMap = new Map(departments.map((d) => [d.id, d.name]));
+      const desigMap = new Map(designations.map((d) => [d.id, d.name]));
+
+      const enriched = list.map((item) => ({
+        ...item,
+        departmentName: item.departmentId ? deptMap.get(item.departmentId) || null : null,
+        designationName: item.designationId ? desigMap.get(item.designationId) || null : null,
+      }));
+
+      return res.status(200).json({ registrations: enriched });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // 4. PATCH /api/organizations/registrations/:id/status
+  // Reject or mark registration as handled
+  router.patch("/registrations/:id/status", authenticateToken, async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const userRole = req.user.role;
+      const userPerms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
+      const isOwner = userRole === "OWNER" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
+      const canManage = isOwner || userRole === "ADMIN" || userRole === "HR" || userPerms.includes("employees.create") || userPerms.includes("employees.registration");
+
+      if (!canManage) {
+        return res.status(403).json({ message: "Access denied." });
+      }
+
+      const { id } = req.params;
+      const { status } = req.body || {};
+
+      const updated = await prisma.employeeRegistration.updateMany({
+        where: { id, organizationId },
+        data: { status: status || "ENLISTED" },
+      });
+
+      return res.status(200).json({ success: true, count: updated.count });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 

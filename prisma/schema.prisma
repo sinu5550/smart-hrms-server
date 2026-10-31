@@ -435,6 +435,7 @@ model Organization {
   disciplinaryActions   DisciplinaryAction[]
   trainingPrograms      TrainingProgram[]
   kpiAppraisals         KpiAppraisal[]
+  employeeRegistrations EmployeeRegistration[]
 
   @@index([emailDomain])
   @@index([status])
@@ -805,4 +806,32 @@ model KpiAppraisal {
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@map("kpi_appraisals")
+}
+
+model EmployeeRegistration {
+  id                      String        @id @default(uuid()) @db.Uuid
+  organizationId          String        @map("organization_id") @db.Uuid
+  fullName                String        @map("full_name")
+  email                   String
+  phone                   String?
+  nidOrPassport           String?       @map("nid_or_passport")
+  dateOfBirth             DateTime?     @map("date_of_birth") @db.Date
+  gender                  String?
+  bloodGroup              String?       @map("blood_group")
+  presentAddress          String?       @map("present_address") @db.Text
+  permanentAddress        String?       @map("permanent_address") @db.Text
+  emergencyContactName    String?       @map("emergency_contact_name")
+  emergencyContactPhone   String?       @map("emergency_contact_phone")
+  emergencyContactRelation String?      @map("emergency_contact_relation")
+  departmentId            String?       @map("department_id") @db.Uuid
+  designationId           String?       @map("designation_id") @db.Uuid
+  avatarUrl               String?       @map("avatar_url") @db.Text
+  status                  String        @default("PENDING") // PENDING, ENLISTED, REJECTED
+  createdAt               DateTime      @default(now()) @map("created_at")
+  updatedAt               DateTime      @updatedAt @map("updated_at")
+
+  organization            Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@map("employee_registrations")
 }
