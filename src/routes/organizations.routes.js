@@ -210,6 +210,10 @@ function createOrganizationsRouter(prisma) {
           employeePrefix: true,
           ownerEmail: true,
           logoUrl: true,
+          address: true,
+          weekendDays: true,
+          hasRosterDuty: true,
+          rosterDepartmentIds: true,
           status: true,
           createdAt: true,
           subscriptions: {
@@ -240,8 +244,22 @@ function createOrganizationsRouter(prisma) {
           ...(dto.name ? { name: dto.name.trim() } : {}),
           ...(dto.logoUrl !== undefined ? { logoUrl: dto.logoUrl } : {}),
           ...(dto.employeePrefix ? { employeePrefix: dto.employeePrefix.trim().toUpperCase() } : {}),
+          ...(dto.address !== undefined ? { address: dto.address ? dto.address.trim() : null } : {}),
+          ...(dto.weekendDays !== undefined ? { weekendDays: dto.weekendDays } : {}),
+          ...(dto.hasRosterDuty !== undefined ? { hasRosterDuty: Boolean(dto.hasRosterDuty) } : {}),
+          ...(dto.rosterDepartmentIds !== undefined ? { rosterDepartmentIds: dto.rosterDepartmentIds } : {}),
         },
-        select: { id: true, name: true, slug: true, logoUrl: true, employeePrefix: true },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          logoUrl: true,
+          employeePrefix: true,
+          address: true,
+          weekendDays: true,
+          hasRosterDuty: true,
+          rosterDepartmentIds: true,
+        },
       });
 
       return res.status(200).json({ organization: updated });

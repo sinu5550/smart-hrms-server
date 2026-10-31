@@ -540,6 +540,276 @@ function createAttendanceRouter(prisma) {
     }
   });
 
+  // GET /api/attendance/admin/summary-report
+  // Generates per-employee aggregated summary for date range (as in user requirement)
+  router.get("/admin/summary-report", requireRoles("HR", "ADMIN"), async (req, res, next) => {
+    try {
+      const { startDate, endDate, departmentId } = req.query;
+      if (!startDate || !endDate) {
+        return res.status(400).json({ message: "startDate and endDate are required." });
+      }
+
+      const organizationId = req.user.organizationId;
+      const org = await prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          logoUrl: true,
+          ownerEmail: true,
+          weekendDays: true,
+          hasRosterDuty: true,
+          rosterDepartmentIds: true,
+        },
+      });
+
+      const ownerEmail = (org?.ownerEmail || "").toLowerCase();
+      const orgWeekendDays = Array.isArray(org?.weekendDays) && org.weekendDays.length > 0
+        ? org.weekendDays
+        : ["Friday"];
+      const hasRoster = Boolean(org?.hasRosterDuty);
+      const rosterDeptIds = Array.isArray(org?.rosterDepartmentIds) ? org.rosterDepartmentIds : [];
+
+      // 1. Fetch all applicable employees in organization
+      const employees = await prisma.user.findMany({
+        where: {
+          organizationId,
+          role: { not: "OWNER" },
+          ...(ownerEmail ? { email: { not: ownerEmail } } : {}),
+          ...(departmentId && departmentId !== "ALL" ? { departmentId } : {}),
+          isDeleted: false,
+        },
+        select: {
+          id: true,
+          employeeId: true,
+          fullName: true,
+          departmentId: true,
+          department: { select: { id: true, name: true } },
+          designation: { select: { id: true, name: true } },
+          shiftId: true,
+          shift: { select: { id: true, shiftName: true, startTime: true, endTime: true, gracePeriodMinutes: true } },
+          branch: { select: { id: true, name: true } },
+        },
+        orderBy: [{ department: { name: "asc" } }, { employeeId: "asc" }],
+      });
+
+      // 2. Fetch default shift for standard duration calculation
+      const defaultShift = await prisma.officeSetting.findFirst({
+        where: { organizationId, isDefault: true },
+      }) || await prisma.officeSetting.findFirst({ where: { organizationId } });
+
+      const startD = new Date(startDate);
+      const endD = new Date(endDate);
+      startD.setHours(0, 0, 0, 0);
+      endD.setHours(23, 59, 59, 999);
+
+      // Generate all calendar day strings in the range [YYYY-MM-DD]
+      const calendarDates = [];
+      const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      for (let curr = new Date(startD); curr <= endD; curr.setDate(curr.getDate() + 1)) {
+        calendarDates.push({
+          dateStr: curr.toISOString().split("T")[0],
+          dayName: dayNames[curr.getDay()],
+        });
+      }
+
+      // 3. Fetch all attendance records in range
+      const attendances = await prisma.attendance.findMany({
+        where: {
+          organizationId,
+          date: {
+            gte: new Date(startDate),
+            lte: new Date(endDate),
+          },
+        },
+        select: {
+          userId: true,
+          date: true,
+          checkInTime: true,
+          checkOutTime: true,
+          status: true,
+          totalWorkMinutes: true,
+          overtimeMinutes: true,
+        },
+      });
+
+      // 4. Fetch approved leaves in range
+      const leaves = await prisma.leaveRequest.findMany({
+        where: {
+          organizationId,
+          status: "APPROVED",
+          startDate: { lte: endD },
+          endDate: { gte: startD },
+        },
+        select: {
+          userId: true,
+          startDate: true,
+          endDate: true,
+        },
+      });
+
+      // Group attendances by userId -> date string (YYYY-MM-DD)
+      const userAttMap = new Map();
+      attendances.forEach((att) => {
+        if (!userAttMap.has(att.userId)) userAttMap.set(att.userId, new Map());
+        const dStr = new Date(att.date).toISOString().split("T")[0];
+        userAttMap.get(att.userId).set(dStr, att);
+      });
+
+      // Helper function to format minutes as HH:MM
+      const formatHoursMins = (totalMinutes) => {
+        const isNegative = totalMinutes < 0;
+        const absMins = Math.abs(Math.round(totalMinutes));
+        const h = Math.floor(absMins / 60);
+        const m = absMins % 60;
+        return `${isNegative ? "-" : ""}${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+      };
+
+      // 5. Aggregate summary per employee
+      const summaryRows = employees.map((emp, index) => {
+        const isRosterEmp = hasRoster && emp.departmentId && rosterDeptIds.includes(emp.departmentId);
+        const userAtts = userAttMap.get(emp.id) || new Map();
+
+        // Calculate expected daily duty hours from shift
+        const empShift = emp.shift || defaultShift;
+        let shiftDutyMins = 8 * 60; // 8 hours default (480 mins)
+        let shiftStartMins = 9 * 60;
+        let shiftGrace = 30;
+
+        if (empShift?.startTime && empShift?.endTime) {
+          const [sh, sm] = empShift.startTime.split(":").map(Number);
+          const [eh, em] = empShift.endTime.split(":").map(Number);
+          let diff = (eh * 60 + em) - (sh * 60 + sm);
+          if (diff <= 0) diff += 24 * 60; // overnight shift
+          shiftDutyMins = Math.max(60, diff - 60); // 1 hr standard break deduction or net duration
+          shiftStartMins = sh * 60 + sm;
+          shiftGrace = empShift.gracePeriodMinutes || 30;
+        }
+
+        let officeDays = 0;
+        let presentCount = 0;
+        let lateCount = 0;
+        let leaveCount = 0;
+        let absentCount = 0;
+        let extremeDelayCount = 0;
+        let totalDelayMinutes = 0;
+        let actualDutyMinutes = 0;
+        let expectedDutyMinutes = 0;
+        let overtimeDutyMinutes = 0;
+        let overtimeDaysCount = 0;
+
+        // Check each calendar day
+        for (const cal of calendarDates) {
+          const isWeekend = isRosterEmp ? false : orgWeekendDays.includes(cal.dayName);
+
+          // If day is a weekend for standard employee, don't count towards standard working office days unless they worked
+          if (!isWeekend) {
+            officeDays++;
+          }
+
+          // Check if employee had approved leave on this date
+          const calTime = new Date(cal.dateStr).getTime();
+          const hasLeave = leaves.some((l) => {
+            if (l.userId !== emp.id) return false;
+            const lStart = new Date(l.startDate).getTime();
+            const lEnd = new Date(l.endDate).getTime();
+            return calTime >= lStart && calTime <= lEnd;
+          });
+
+          const attRecord = userAtts.get(cal.dateStr);
+
+          if (hasLeave) {
+            leaveCount++;
+          } else if (attRecord) {
+            presentCount++;
+            if (attRecord.status === "LATE") {
+              lateCount++;
+            }
+
+            // Actual work minutes
+            const workMins = attRecord.totalWorkMinutes || (shiftDutyMins); // Fallback to full shift if punch-in active
+            actualDutyMinutes += workMins;
+
+            // Overtime
+            const otMins = attRecord.overtimeMinutes || 0;
+            if (otMins > 0) {
+              overtimeDutyMinutes += otMins;
+              overtimeDaysCount++;
+            }
+
+            // Delay computation
+            if (attRecord.checkInTime) {
+              const punchIn = new Date(attRecord.checkInTime);
+              const punchMins = ((punchIn.getUTCHours() + 6) % 24) * 60 + punchIn.getUTCMinutes();
+              const delay = punchMins - shiftStartMins;
+              if (delay > shiftGrace) {
+                totalDelayMinutes += delay;
+                // If delay exceeds 60 minutes beyond grace period, catalog as Extreme Delay
+                if (delay >= shiftGrace + 60) {
+                  extremeDelayCount++;
+                }
+              }
+            }
+          } else {
+            // Not on leave, no attendance record
+            if (!isWeekend) {
+              absentCount++;
+            }
+          }
+        }
+
+        // Expected duty minutes = officeDays * shiftDutyMins
+        expectedDutyMinutes = officeDays * shiftDutyMins;
+
+        // Extra / Less Duty Balance in minutes = actualDutyMinutes + overtimeDutyMinutes - expectedDutyMinutes
+        const balanceMinutes = actualDutyMinutes + overtimeDutyMinutes - expectedDutyMinutes;
+
+        return {
+          serialNo: index + 1,
+          employeeId: emp.employeeId,
+          employeeName: emp.fullName,
+          departmentName: emp.department?.name || "General",
+          designation: emp.designation?.name || "Staff",
+          branchName: emp.branch?.name || "Head Office",
+          isRoster: isRosterEmp,
+          officeDays,
+          absent: absentCount,
+          leave: leaveCount,
+          present: presentCount,
+          late: lateCount,
+          extremeDelay: extremeDelayCount,
+          totalDelayFormatted: formatHoursMins(totalDelayMinutes),
+          totalDelayMinutes,
+          overtimeDays: overtimeDaysCount,
+          expectedDutyFormatted: formatHoursMins(expectedDutyMinutes),
+          expectedDutyMinutes,
+          actualDutyFormatted: formatHoursMins(actualDutyMinutes),
+          actualDutyMinutes,
+          overtimeFormatted: formatHoursMins(overtimeDutyMinutes),
+          overtimeMinutes: overtimeDutyMinutes,
+          extraLessBalanceFormatted: formatHoursMins(balanceMinutes),
+          balanceMinutes,
+        };
+      });
+
+      return res.status(200).json({
+        organization: {
+          name: org?.name || "Halal Food Service",
+          address: org?.address || "39/A Senpara Parbota, Mirpur 10",
+          logoUrl: org?.logoUrl || null,
+        },
+        reportPeriod: {
+          startDate,
+          endDate,
+        },
+        summary: summaryRows,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 

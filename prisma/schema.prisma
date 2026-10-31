@@ -396,6 +396,10 @@ model Organization {
   officeLongitude       Float?                     @map("office_longitude")
   geofenceRadiusMeters  Int?                       @default(250) @map("geofence_radius_meters")
   enableGpsAttendance   Boolean?                   @default(true) @map("enable_gps_attendance")
+  address               String?                    @db.Text
+  weekendDays           Json?                      @default("[\"Friday\"]") @map("weekend_days")
+  hasRosterDuty         Boolean?                   @default(false) @map("has_roster_duty")
+  rosterDepartmentIds   Json?                      @default("[]") @map("roster_department_ids")
   createdAt             DateTime                   @default(now()) @map("created_at")
   updatedAt             DateTime                   @updatedAt @map("updated_at")
   users                 User[]
