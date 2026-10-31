@@ -49,6 +49,13 @@ function createAuthRouter(prisma) {
       }
     }
 
+    // Check if user is Department Head of any department
+    const headedDepts = await prisma.department.findMany({
+      where: { headUserId: user.id },
+      select: { id: true, name: true, code: true },
+    });
+    const isDeptHead = headedDepts.length > 0;
+
     return {
       accessToken,
       refreshToken,
@@ -62,6 +69,8 @@ function createAuthRouter(prisma) {
         role: user.role,
         attendanceExempt: Boolean(user.attendanceExempt),
         isOwner: user.role === "OWNER" || (organizationData?.ownerEmail && user.email?.toLowerCase() === organizationData.ownerEmail.toLowerCase()),
+        isDeptHead,
+        headedDepartments: headedDepts,
         status: user.status,
         avatarUrl: user.avatarUrl,
         permissions: activePermissions,
@@ -306,6 +315,7 @@ function createAuthRouter(prisma) {
           joiningDate: true,
           department: { select: { id: true, name: true } },
           designation: { select: { id: true, name: true } },
+          headedDepartments: { select: { id: true, name: true, code: true } },
         },
       });
 
@@ -317,10 +327,13 @@ function createAuthRouter(prisma) {
       const directPerms = Array.isArray(user.permissions) ? user.permissions : [];
       const rolePerms = Array.isArray(user.customRole?.permissions) ? user.customRole.permissions : [];
       const mergedPermissions = Array.from(new Set([...directPerms, ...rolePerms]));
+      const isDeptHead = Array.isArray(user.headedDepartments) && user.headedDepartments.length > 0;
 
       return res.status(200).json({
         ...user,
         isOwner: user.role === "OWNER" || (user.organization?.ownerEmail && user.email?.toLowerCase() === user.organization.ownerEmail.toLowerCase()),
+        isDeptHead,
+        headedDepartments: user.headedDepartments || [],
         permissions: mergedPermissions,
       });
     } catch (err) {
