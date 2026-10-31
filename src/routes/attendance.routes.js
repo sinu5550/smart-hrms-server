@@ -590,6 +590,7 @@ function createAttendanceRouter(prisma) {
           shiftId: true,
           shift: { select: { id: true, shiftName: true, startTime: true, endTime: true, gracePeriodMinutes: true } },
           branch: { select: { id: true, name: true } },
+          rosterOffDays: true,
         },
         orderBy: [{ department: { name: "asc" } }, { employeeId: "asc" }],
       });
@@ -701,7 +702,8 @@ function createAttendanceRouter(prisma) {
 
         // Check each calendar day
         for (const cal of calendarDates) {
-          const isWeekend = isRosterEmp ? false : orgWeekendDays.includes(cal.dayName);
+          const empRosterOffDays = Array.isArray(emp.rosterOffDays) ? emp.rosterOffDays : [];
+          const isWeekend = isRosterEmp ? empRosterOffDays.includes(cal.dayName) : orgWeekendDays.includes(cal.dayName);
 
           // If day is a weekend for standard employee, don't count towards standard working office days unless they worked
           if (!isWeekend) {
