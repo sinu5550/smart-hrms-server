@@ -195,7 +195,7 @@ function createDepartmentsRouter(prisma) {
 
       // Check permission: Must be ADMIN, HR, or Head of this Department
       const isDeptHead = dept.headUserId === callerUserId;
-      const isManager = userRole === "ADMIN" || userRole === "HR";
+      const isManager = userRole === "OWNER" || userRole === "ADMIN" || userRole === "HR" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
       if (!isDeptHead && !isManager) {
         return res.status(403).json({ message: "Only Department Head, HR or Admin can assign roster off-days." });
       }
