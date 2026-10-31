@@ -119,7 +119,8 @@ model User {
   permanentAddress String? @map("permanent_address") @db.Text
 
   departmentId  String?      @map("department_id") @db.Uuid
-  department    Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  department    Department?  @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: SetNull)
+  headedDepartments Department[] @relation("DepartmentHead")
   designationId String?      @map("designation_id") @db.Uuid
   designation   Designation? @relation(fields: [designationId], references: [id], onDelete: SetNull)
   shiftId       String?      @map("shift_id") @db.Uuid
@@ -140,6 +141,7 @@ model User {
   deletedAt          DateTime? @map("deleted_at")
   attendanceExempt   Boolean   @default(false) @map("attendance_exempt")
   permissions        Json?     @default("[]") @map("permissions")
+  rosterOffDays      Json?     @default("[]") @map("roster_off_days")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -168,7 +170,9 @@ model Department {
   organizationId String?       @map("organization_id") @db.Uuid
   name           String
   code           String
-  users          User[]
+  headUserId     String?       @map("head_user_id") @db.Uuid
+  headUser       User?         @relation("DepartmentHead", fields: [headUserId], references: [id], onDelete: SetNull)
+  users          User[]        @relation("DepartmentMembers")
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
   Organization   Organization? @relation(fields: [organizationId], references: [id])
@@ -308,6 +312,9 @@ model LeaveRequest {
   status         LeaveStatus @default(PENDING)
   actionedById   String?     @map("actioned_by_id") @db.Uuid
   rejectionNote  String?     @map("rejection_note") @db.Text
+  deptHeadStatus String?     @default("PENDING") @map("dept_head_status") // PENDING, APPROVED, REJECTED
+  deptHeadActionedAt DateTime? @map("dept_head_actioned_at")
+  deptHeadNote   String?     @map("dept_head_note") @db.Text
   createdAt      DateTime    @default(now()) @map("created_at")
   updatedAt      DateTime    @updatedAt @map("updated_at")
 

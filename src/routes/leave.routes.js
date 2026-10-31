@@ -38,15 +38,36 @@ function createLeaveRouter(prisma) {
     }
   });
 
-  // GET /api/leave (Admin/HR sees all, Employee sees own)
+  // GET /api/leave (Admin/HR sees all, Dept Head sees department, Employee sees own)
   router.get("/", async (req, res, next) => {
     try {
       const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
       const isManager = req.user.role === "ADMIN" || req.user.role === "HR";
 
-      const whereClause = isManager
-        ? { organizationId }
-        : { organizationId, userId: req.user.userId };
+      // Check if user is head of any departments
+      const headedDepts = await prisma.department.findMany({
+        where: { organizationId, headUserId: callerUserId },
+        select: { id: true },
+      });
+      const headedDeptIds = headedDepts.map((d) => d.id);
+      const isDeptHead = headedDeptIds.length > 0;
+
+      let whereClause = {};
+      if (isManager) {
+        whereClause = { organizationId };
+      } else if (isDeptHead) {
+        // Dept Head sees their own leaves OR leaves of members in their department
+        whereClause = {
+          organizationId,
+          OR: [
+            { userId: callerUserId },
+            { user: { departmentId: { in: headedDeptIds } } },
+          ],
+        };
+      } else {
+        whereClause = { organizationId, userId: callerUserId };
+      }
 
       const requests = await prisma.leaveRequest.findMany({
         where: whereClause,
@@ -59,7 +80,8 @@ function createLeaveRouter(prisma) {
               fullName: true,
               employeeId: true,
               avatarUrl: true,
-              department: { select: { name: true } },
+              departmentId: true,
+              department: { select: { id: true, name: true, headUserId: true } },
             },
           },
         },
@@ -111,6 +133,60 @@ function createLeaveRouter(prisma) {
       });
 
       return res.status(201).json(created);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // PATCH /api/leave/:id/dept-head-status (Department Head approves or rejects)
+  router.patch("/:id/dept-head-status", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { deptHeadStatus, note } = req.body || {};
+      const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+      const isManager = req.user.role === "ADMIN" || req.user.role === "HR";
+
+      const existing = await prisma.leaveRequest.findFirst({
+        where: { id, organizationId },
+        include: {
+          user: { select: { id: true, departmentId: true } },
+        },
+      });
+
+      if (!existing) {
+        return res.status(404).json({ message: "Leave request not found." });
+      }
+
+      // Verify that caller is the Head of the employee's department (or Admin/HR)
+      if (!isManager) {
+        if (!existing.user?.departmentId) {
+          return res.status(403).json({ message: "Employee does not belong to any department." });
+        }
+        const dept = await prisma.department.findFirst({
+          where: { id: existing.user.departmentId, organizationId, headUserId: callerUserId },
+        });
+        if (!dept) {
+          return res.status(403).json({ message: "Only the designated Department Head can review this leave." });
+        }
+      }
+
+      const updated = await prisma.leaveRequest.update({
+        where: { id },
+        data: {
+          deptHeadStatus: deptHeadStatus === "REJECTED" ? "REJECTED" : "APPROVED",
+          deptHeadActionedAt: new Date(),
+          deptHeadNote: note || null,
+        },
+        include: {
+          leaveType: true,
+          user: {
+            select: { id: true, fullName: true, employeeId: true, department: { select: { name: true } } },
+          },
+        },
+      });
+
+      return res.status(200).json(updated);
     } catch (err) {
       next(err);
     }
