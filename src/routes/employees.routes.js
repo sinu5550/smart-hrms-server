@@ -519,10 +519,19 @@ function createEmployeesRouter(prisma) {
         }
       }
 
-      const initialPassword = dto.password?.trim()
-        ? dto.password.trim()
-        : crypto.randomBytes(8).toString("hex");
-      const passwordHash = await bcrypt.hash(initialPassword, 12);
+      let finalPasswordHash = null;
+      let initialPassword = null;
+
+      if (dto.passwordHash && typeof dto.passwordHash === "string" && dto.passwordHash.trim()) {
+        finalPasswordHash = dto.passwordHash.trim();
+        initialPassword = "(Set by applicant during registration)";
+      } else if (dto.password?.trim()) {
+        initialPassword = dto.password.trim();
+        finalPasswordHash = await bcrypt.hash(initialPassword, 12);
+      } else {
+        initialPassword = crypto.randomBytes(8).toString("hex");
+        finalPasswordHash = await bcrypt.hash(initialPassword, 12);
+      }
 
       let permissions = [];
       if (dto.customRoleId) {
@@ -543,8 +552,8 @@ function createEmployeesRouter(prisma) {
           shiftId: dto.shiftId,
           customRoleId: dto.customRoleId,
           permissions,
-          passwordHash,
-          mustChangePassword: !dto.password?.trim(),
+          passwordHash: finalPasswordHash,
+          mustChangePassword: !dto.password?.trim() && !dto.passwordHash?.trim(),
           bloodGroup: dto.bloodGroup,
           presentAddress: dto.presentAddress,
           permanentAddress: dto.permanentAddress,

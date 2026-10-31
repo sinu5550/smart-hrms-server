@@ -826,6 +826,7 @@ model EmployeeRegistration {
   departmentId            String?       @map("department_id") @db.Uuid
   designationId           String?       @map("designation_id") @db.Uuid
   avatarUrl               String?       @map("avatar_url") @db.Text
+  passwordHash            String?       @map("password_hash") @db.Text
   status                  String        @default("PENDING") // PENDING, ENLISTED, REJECTED
   createdAt               DateTime      @default(now()) @map("created_at")
   updatedAt               DateTime      @updatedAt @map("updated_at")

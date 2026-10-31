@@ -496,12 +496,37 @@ function createOrganizationsRouter(prisma) {
       const fullName = (dto.fullName || "").trim();
       const email = (dto.email || "").trim().toLowerCase();
       const phone = (dto.phone || "").trim();
+      const password = (dto.password || "").trim();
 
       if (!fullName) {
         return res.status(400).json({ message: "Full Name is required." });
       }
       if (!email || !email.includes("@")) {
         return res.status(400).json({ message: "A valid Email address is required." });
+      }
+      if (!phone) {
+        return res.status(400).json({ message: "Phone number is required." });
+      }
+      if (!dto.dateOfBirth) {
+        return res.status(400).json({ message: "Date of Birth is required." });
+      }
+      if (!dto.gender) {
+        return res.status(400).json({ message: "Gender is required." });
+      }
+      if (!dto.bloodGroup) {
+        return res.status(400).json({ message: "Blood Group is required." });
+      }
+      if (!dto.departmentId) {
+        return res.status(400).json({ message: "Department is required." });
+      }
+      if (!dto.presentAddress) {
+        return res.status(400).json({ message: "Present Address is required." });
+      }
+      if (!dto.emergencyContactName || !dto.emergencyContactPhone || !dto.emergencyContactRelation) {
+        return res.status(400).json({ message: "All Emergency Contact fields are required." });
+      }
+      if (!password || password.length < 6) {
+        return res.status(400).json({ message: "Password must be at least 6 characters long." });
       }
 
       // Check if user already exists as active employee
@@ -518,6 +543,8 @@ function createOrganizationsRouter(prisma) {
       if (existingUser) {
         return res.status(409).json({ message: "An employee with this email or phone is already enlisted." });
       }
+
+      const passwordHash = await bcrypt.hash(password, 10);
 
       const registration = await prisma.employeeRegistration.create({
         data: {
@@ -537,6 +564,7 @@ function createOrganizationsRouter(prisma) {
           departmentId: dto.departmentId || null,
           designationId: dto.designationId || null,
           avatarUrl: dto.avatarUrl || null,
+          passwordHash,
           status: "PENDING",
         },
       });
