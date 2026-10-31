@@ -599,18 +599,18 @@ function createAttendanceRouter(prisma) {
         where: { organizationId, isDefault: true },
       }) || await prisma.officeSetting.findFirst({ where: { organizationId } });
 
-      const startD = new Date(startDate);
-      const endD = new Date(endDate);
-      startD.setHours(0, 0, 0, 0);
-      endD.setHours(23, 59, 59, 999);
+      const [sY, sM, sD] = startDate.split("-").map(Number);
+      const [eY, eM, eD] = endDate.split("-").map(Number);
+      const startUtc = new Date(Date.UTC(sY, sM - 1, sD, 0, 0, 0, 0));
+      const endUtc = new Date(Date.UTC(eY, eM - 1, eD, 23, 59, 59, 999));
 
-      // Generate all calendar day strings in the range [YYYY-MM-DD]
+      // Generate all calendar day strings in the range [YYYY-MM-DD] using UTC to prevent timezone drift
       const calendarDates = [];
       const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-      for (let curr = new Date(startD); curr <= endD; curr.setDate(curr.getDate() + 1)) {
+      for (let d = new Date(Date.UTC(sY, sM - 1, sD)); d <= new Date(Date.UTC(eY, eM - 1, eD)); d.setUTCDate(d.getUTCDate() + 1)) {
         calendarDates.push({
-          dateStr: curr.toISOString().split("T")[0],
-          dayName: dayNames[curr.getDay()],
+          dateStr: d.toISOString().split("T")[0],
+          dayName: dayNames[d.getUTCDay()],
         });
       }
 
@@ -619,8 +619,8 @@ function createAttendanceRouter(prisma) {
         where: {
           organizationId,
           date: {
-            gte: new Date(startDate),
-            lte: new Date(endDate),
+            gte: startUtc,
+            lte: endUtc,
           },
         },
         select: {
