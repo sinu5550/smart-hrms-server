@@ -737,12 +737,11 @@ function createDevicesRouter(prisma) {
 
         try {
           if (existingEmp) {
-            // Merge biometric info into existing user permissions JSON
+            // Merge biometric info into existing user permissions JSON strictly matching terminal counts
             const curPerms = Array.isArray(existingEmp.permissions) ? existingEmp.permissions : [];
             const updatedPerms = curPerms.filter((p) => typeof p === "string" && !p.startsWith("bio:"));
-            const hasFaceOnTerminal = numOfFace > 0 || !!faceUrl;
             if (numOfFP > 0) updatedPerms.push("bio:fingerprint");
-            if (hasFaceOnTerminal) updatedPerms.push("bio:face");
+            if (numOfFace > 0) updatedPerms.push("bio:face");
 
             // If user doesn't have an avatar in HRMS but terminal has a face image, pull it!
             if (!existingEmp.avatarUrl && faceUrl) {
