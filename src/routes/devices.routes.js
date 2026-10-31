@@ -2387,10 +2387,8 @@ function createDevicesRouter(prisma) {
           });
         }
 
-        // Automatic Face Sync: Only check if new biometric punches were detected or if explicitly triggered
-        // This avoids hammering device & Cloudinary API and saves server memory for SaaS scaling
-        if (newRawCount > 0) {
-          try {
+        // Automatic Biometric Status Sync: Always keep employee bio badges 100% matched with terminal hardware!
+        try {
           // Helper: make an authenticated HTTPS request to device with Digest Auth
           const deviceRequest = (method, reqPath, bodyStr = null) =>
             new Promise((resolve) => {
@@ -2420,7 +2418,6 @@ function createDevicesRouter(prisma) {
                     if (bodyBuf) req2.write(bodyBuf);
                     req2.end();
                   } else if (res1.statusCode === 200) {
-                    // Some devices skip 401 on first request if session is cached
                     const chunks = [];
                     res1.on("data", (c) => chunks.push(c));
                     res1.on("end", () => resolve(Buffer.concat(chunks)));
@@ -2436,7 +2433,7 @@ function createDevicesRouter(prisma) {
               req1.end();
             });
 
-          // Step 1: Fetch terminal UserInfo for name cross-check (paginated, up to 500 users)
+          // Step 1: Fetch terminal UserInfo to reconcile fingerprint & face counts for ALL users
           const termPersonNameByNo = new Map();
           let uPos = 0;
           while (true) {
@@ -2482,126 +2479,88 @@ function createDevicesRouter(prisma) {
             if (uList.length < 50 || uPos >= (uData?.UserInfoSearch?.totalMatches || 0)) break;
           }
 
-          // Step 2: Fetch all face records with pagination (try staticWhite first, then all types)
-          const allMatchList = [];
-          for (const libType of ["staticWhite", "blackFD"]) {
-            let fdPos = 0;
-            while (true) {
-              const fdPath = "/ISAPI/Intelligent/FDLib/FDSearch?format=json";
-              const fdBody = JSON.stringify({
-                searchResultPosition: fdPos,
-                maxResults: 50,
-                faceLibType: libType,
-                FDID: "1",
-              });
-              const fdBuf = await deviceRequest("POST", fdPath, fdBody);
-              if (!fdBuf) break;
-              let fdData = null;
-              try { fdData = JSON.parse(fdBuf.toString()); } catch { break; }
-              const batch = fdData?.MatchList || [];
-              allMatchList.push(...batch);
-              fdPos += batch.length;
-              if (batch.length < 50 || fdPos >= (fdData?.totalMatches || 0)) break;
-            }
-          }
-
-          console.log(`[Auto-Face] Device ${host}: found ${allMatchList.length} face records, ${termPersonNameByNo.size} terminal users`);
-
-          // Step 3: Match each face to an employee and upload to Cloudinary
-          // Deduplicate: track which employee IDs we already processed this cycle
-          const processedEmpIds = new Set();
-
-          for (const m of allMatchList) {
-            const fpid = String(m.FPID || "").trim();
-            const faceURL = m.faceURL;
-            if (!fpid || !faceURL) continue;
-
-            const terminalPersonName = termPersonNameByNo.get(fpid) || "";
-
-            // Find matching employee by FPID (maps to employeeNo on device)
-            const empToUpdate = findUser(fpid, terminalPersonName);
-            if (!empToUpdate) {
-              console.warn(`[Auto-Face] No DB match for FPID=${fpid} name="${terminalPersonName}"`);
-              continue;
-            }
-
-            // Skip OWNER role
-            if (empToUpdate.role === "OWNER") continue;
-
-            // Skip if already has avatar
-            if (empToUpdate.avatarUrl) continue;
-
-            // Skip if already processed this employee in this cycle (prevent duplicate assignment)
-            if (processedEmpIds.has(empToUpdate.id)) continue;
-
-            // Safety: If both names exist and are completely different, do not assign
-            if (terminalPersonName && empToUpdate.fullName) {
-              const cleanTerm = terminalPersonName.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-              const cleanDb = empToUpdate.fullName.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-              if (cleanTerm && cleanDb && !cleanTerm.includes(cleanDb) && !cleanDb.includes(cleanTerm)) {
-                console.warn(`[Auto-Face Safe Check] Skipped FPID=${fpid} ("${terminalPersonName}") -> no match DB "${empToUpdate.fullName}"`);
-                continue;
-              }
-            }
-
-            // Download face image from device
-            let getPath;
-            try {
-              const urlObj = new URL(faceURL);
-              getPath = urlObj.pathname + urlObj.search;
-            } catch {
-              // If faceURL is already a path
-              getPath = faceURL;
-            }
-
-            const imgBuf = await deviceRequest("GET", getPath);
-            if (!imgBuf || imgBuf.length < 500) {
-              console.warn(`[Auto-Face] Image too small or missing for FPID=${fpid}`);
-              continue;
-            }
-
-            // Upload to Cloudinary
-            const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "jawcusfd";
-            const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET || "ekhone-hrms";
-            const base64Data = `data:image/jpeg;base64,${imgBuf.toString("base64")}`;
-            const formData = new FormData();
-            formData.append("file", base64Data);
-            formData.append("upload_preset", uploadPreset);
-            formData.append("folder", "hrms/employee-avatars");
-            formData.append("public_id", `emp_${empToUpdate.id}_face`);
-
-            try {
-              const upRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
-                method: "POST",
-                body: formData,
-              });
-              const upJson = await upRes.json();
-              if (upJson.secure_url) {
-                // Ensure bio:face is in user's permissions array so frontend renders face badge colored!
-                const existingPerms = Array.isArray(empToUpdate.permissions) ? empToUpdate.permissions : [];
-                const updatedPerms = Array.from(new Set([...existingPerms, "bio:face"]));
-
-                await prisma.user.update({
-                  where: { id: empToUpdate.id },
-                  data: {
-                    avatarUrl: upJson.secure_url,
-                    permissions: updatedPerms,
-                  },
+          // Step 2: Fetch and sync face photos only if new punches or new face detected
+          if (newRawCount > 0) {
+            const allMatchList = [];
+            for (const libType of ["staticWhite", "blackFD"]) {
+              let fdPos = 0;
+              while (true) {
+                const fdPath = "/ISAPI/Intelligent/FDLib/FDSearch?format=json";
+                const fdBody = JSON.stringify({
+                  searchResultPosition: fdPos,
+                  maxResults: 50,
+                  faceLibType: libType,
+                  FDID: "1",
                 });
-                empToUpdate.avatarUrl = upJson.secure_url;
-                empToUpdate.permissions = updatedPerms;
-                processedEmpIds.add(empToUpdate.id);
-                console.log(`[Auto-Face] ✓ Synced face & bio badge for ${empToUpdate.fullName} (${empToUpdate.employeeId}) FPID=${fpid}`);
-              } else {
-                console.warn(`[Auto-Face] Cloudinary upload failed for ${empToUpdate.fullName}:`, upJson.error?.message);
+                const fdBuf = await deviceRequest("POST", fdPath, fdBody);
+                if (!fdBuf) break;
+                let fdData = null;
+                try { fdData = JSON.parse(fdBuf.toString()); } catch { break; }
+                const batch = fdData?.MatchList || [];
+                allMatchList.push(...batch);
+                fdPos += batch.length;
+                if (batch.length < 50 || fdPos >= (fdData?.totalMatches || 0)) break;
               }
-            } catch (upErr) {
-              console.warn(`[Auto-Face] Upload error for ${empToUpdate.fullName}:`, upErr.message);
+            }
+
+            const processedEmpIds = new Set();
+            for (const m of allMatchList) {
+              const fpid = String(m.FPID || "").trim();
+              const faceURL = m.faceURL;
+              if (!fpid || !faceURL) continue;
+
+              const terminalPersonName = termPersonNameByNo.get(fpid) || "";
+              const empToUpdate = findUser(fpid, terminalPersonName);
+              if (!empToUpdate || empToUpdate.role === "OWNER" || empToUpdate.avatarUrl || processedEmpIds.has(empToUpdate.id)) continue;
+
+              let getPath;
+              try {
+                const urlObj = new URL(faceURL);
+                getPath = urlObj.pathname + urlObj.search;
+              } catch {
+                getPath = faceURL;
+              }
+
+              const imgBuf = await deviceRequest("GET", getPath);
+              if (!imgBuf || imgBuf.length < 500) continue;
+
+              const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "jawcusfd";
+              const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET || "ekhone-hrms";
+              const base64Data = `data:image/jpeg;base64,${imgBuf.toString("base64")}`;
+              const formData = new FormData();
+              formData.append("file", base64Data);
+              formData.append("upload_preset", uploadPreset);
+              formData.append("folder", "hrms/employee-avatars");
+              formData.append("public_id", `emp_${empToUpdate.id}_face`);
+
+              try {
+                const upRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+                  method: "POST",
+                  body: formData,
+                });
+                const upJson = await upRes.json();
+                if (upJson.secure_url) {
+                  const existingPerms = Array.isArray(empToUpdate.permissions) ? empToUpdate.permissions : [];
+                  const updatedPerms = Array.from(new Set([...existingPerms, "bio:face"]));
+
+                  await prisma.user.update({
+                    where: { id: empToUpdate.id },
+                    data: {
+                      avatarUrl: upJson.secure_url,
+                      permissions: updatedPerms,
+                    },
+                  });
+                  empToUpdate.avatarUrl = upJson.secure_url;
+                  empToUpdate.permissions = updatedPerms;
+                  processedEmpIds.add(empToUpdate.id);
+                }
+              } catch (upErr) {
+                console.warn(`[Auto-Face] Upload error:`, upErr.message);
+              }
             }
           }
         } catch (faceErr) {
-          console.warn(`[Auto-Face] Non-blocking sync error for device ${host}:`, faceErr.message);
-        }
+          console.warn(`[Auto-Bio] Sync error for device ${host}:`, faceErr.message);
         }
       }
     } catch (err) {
