@@ -2568,10 +2568,133 @@ function createDevicesRouter(prisma) {
     }
   }
 
-  // Start the background poller interval (runs every 30 seconds)
-  setInterval(pollAllOnlineDevices, 30000);
-  // Run once on server startup after 5 seconds
-  setTimeout(pollAllOnlineDevices, 5000);
+  // Scalable Multi-Tenant Architecture:
+  // Instead of bombarding 1000s of client LAN IPs with 30s background HTTP polling,
+  // we expose an on-demand reconciliation endpoint (/api/devices/reconcile-bio) triggered
+  // when an Admin opens the Employee Directory, and hardware devices push real-time events
+  // directly via webhook (/api/devices/webhook/push-log).
+
+  // POST /api/devices/reconcile-bio
+  // Triggered on-demand by UI when viewing personnel or device management
+  router.post("/reconcile-bio", authenticateToken, async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const onlineDevices = await prisma.biometricDevice.findMany({
+        where: { organizationId, ipAddress: { not: null } },
+      });
+
+      if (!onlineDevices.length) {
+        return res.status(200).json({ success: true, message: "No active devices to reconcile." });
+      }
+
+      // Reconcile in background non-blocking so UI remains instant
+      (async () => {
+        for (const dev of onlineDevices) {
+          try {
+            const host = dev.ipAddress;
+            const user = dev.username || "admin";
+            const pass = dev.password || "";
+
+            // Helper: device request with Digest Auth
+            const deviceRequest = (method, reqPath, bodyStr = null) =>
+              new Promise((resolve) => {
+                const bodyBuf = bodyStr ? Buffer.from(bodyStr) : null;
+                const headers = { "Content-Type": "application/json" };
+                if (bodyBuf) headers["Content-Length"] = bodyBuf.length;
+                else headers["Content-Length"] = 0;
+
+                const req1 = https.request(
+                  { hostname: host, port: 443, path: reqPath, method, rejectUnauthorized: false, timeout: 5000, headers },
+                  (res1) => {
+                    const drain = (r) => { r.resume(); };
+                    if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                      drain(res1);
+                      const digest = buildDigestHeader(method, reqPath, user, pass, res1.headers["www-authenticate"]);
+                      const authHeaders = { ...headers, Authorization: digest };
+                      const req2 = https.request(
+                        { hostname: host, port: 443, path: reqPath, method, rejectUnauthorized: false, timeout: 6000, headers: authHeaders },
+                        (res2) => {
+                          const chunks = [];
+                          res2.on("data", (c) => chunks.push(c));
+                          res2.on("end", () => resolve(Buffer.concat(chunks)));
+                        }
+                      );
+                      req2.on("error", () => resolve(null));
+                      req2.on("timeout", () => { req2.destroy(); resolve(null); });
+                      if (bodyBuf) req2.write(bodyBuf);
+                      req2.end();
+                    } else if (res1.statusCode === 200) {
+                      const chunks = [];
+                      res1.on("data", (c) => chunks.push(c));
+                      res1.on("end", () => resolve(Buffer.concat(chunks)));
+                    } else {
+                      drain(res1);
+                      resolve(null);
+                    }
+                  }
+                );
+                req1.on("error", () => resolve(null));
+                req1.on("timeout", () => { req1.destroy(); resolve(null); });
+                if (bodyBuf) req1.write(bodyBuf);
+                req1.end();
+              });
+
+            let uPos = 0;
+            const dbUsers = await prisma.user.findMany({ where: { organizationId, role: { not: "OWNER" } } });
+
+            while (true) {
+              const uPath = "/ISAPI/AccessControl/UserInfo/Search?format=json";
+              const uBody = JSON.stringify({
+                UserInfoSearchCond: { searchID: `rec_${uPos}`, searchResultPosition: uPos, maxResults: 50 },
+              });
+              const uBuf = await deviceRequest("POST", uPath, uBody);
+              if (!uBuf) break;
+              let uData = null;
+              try { uData = JSON.parse(uBuf.toString()); } catch { break; }
+              const uList = uData?.UserInfoSearch?.UserInfo || [];
+              for (const u of uList) {
+                if (!u.employeeNo) continue;
+                const rawNo = String(u.employeeNo).trim();
+                const cleanNo = rawNo.replace(/-/g, "");
+                const matchedUser = dbUsers.find((dbU) => {
+                  const dbClean = (dbU.employeeId || "").replace(/-/g, "");
+                  return dbClean === cleanNo || dbU.employeeId === rawNo || (u.name && dbU.fullName.toLowerCase() === u.name.toLowerCase());
+                });
+
+                if (matchedUser) {
+                  const numOfFace = Number(u.numOfFace || 0);
+                  const numOfFP = Number(u.numOfFP || 0);
+                  const perms = Array.isArray(matchedUser.permissions) ? matchedUser.permissions : [];
+                  const basePerms = perms.filter((p) => typeof p === "string" && !p.startsWith("bio:"));
+                  const newPerms = [...basePerms];
+                  if (numOfFP > 0) newPerms.push("bio:fingerprint");
+                  if (numOfFace > 0) newPerms.push("bio:face");
+
+                  const sortedCur = [...perms].sort().join(",");
+                  const sortedNew = [...newPerms].sort().join(",");
+                  if (sortedCur !== sortedNew) {
+                    await prisma.user.update({
+                      where: { id: matchedUser.id },
+                      data: { permissions: newPerms },
+                    });
+                    matchedUser.permissions = newPerms;
+                  }
+                }
+              }
+              uPos += uList.length;
+              if (uList.length < 50 || uPos >= (uData?.UserInfoSearch?.totalMatches || 0)) break;
+            }
+          } catch (devErr) {
+            console.warn(`On-demand reconcile error for device ${dev.deviceName}:`, devErr.message);
+          }
+        }
+      })().catch((err) => console.warn("Background on-demand reconcile notice:", err.message));
+
+      return res.status(200).json({ success: true, message: "Reconcile task initiated." });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   return router;
 }
