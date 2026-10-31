@@ -683,7 +683,7 @@ function createAttendanceRouter(prisma) {
           const [eh, em] = empShift.endTime.split(":").map(Number);
           let diff = (eh * 60 + em) - (sh * 60 + sm);
           if (diff <= 0) diff += 24 * 60; // overnight shift
-          shiftDutyMins = Math.max(60, diff - 60); // 1 hr standard break deduction or net duration
+          shiftDutyMins = Math.max(60, diff); // Total shift duty duration as configured
           shiftStartMins = sh * 60 + sm;
           shiftGrace = empShift.gracePeriodMinutes || 30;
         }
@@ -730,7 +730,7 @@ function createAttendanceRouter(prisma) {
             }
 
             // Actual work minutes
-            const workMins = attRecord.totalWorkMinutes || (shiftDutyMins); // Fallback to full shift if punch-in active
+            const workMins = attRecord.checkOutTime ? (attRecord.totalWorkMinutes || 0) : 0;
             actualDutyMinutes += workMins;
 
             // Overtime
