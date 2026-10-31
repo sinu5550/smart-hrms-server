@@ -18,12 +18,27 @@ async function syncEmployeeToHikvisionDevices(prisma, organizationId, employee) 
     // Strip all hyphens from employeeId: EKH-26-0018 -> EKH260018 (never just '18')
     const terminalEmployeeNo = String(employee.employeeId || "").trim().replace(/-/g, "");
 
+    // Map department to terminal groupId
+    let deptGroupId = 1; // Default: General
+    if (employee.departmentId) {
+      const dept = await prisma.department.findUnique({ where: { id: employee.departmentId } });
+      const deptName = (dept?.name || "").toLowerCase();
+      if (deptName.includes("manage")) deptGroupId = 2;
+      else if (deptName.includes("customer") || deptName.includes("service") || deptName.includes("cs")) deptGroupId = 3;
+      else if (deptName.includes("account") || deptName.includes("finance")) deptGroupId = 4;
+      else if (deptName.includes("market") || deptName.includes("sales")) deptGroupId = 5;
+      else if (deptName.includes("supply") || deptName.includes("logistic")) deptGroupId = 6;
+      else if (deptName.includes("hr") || deptName.includes("admin")) deptGroupId = 7;
+      else if (deptName.includes("it") || deptName.includes("software")) deptGroupId = 8;
+    }
+
     const path = "/ISAPI/AccessControl/UserInfo/SetUp?format=json";
     const setupPayload = JSON.stringify({
       UserInfo: {
         employeeNo: terminalEmployeeNo,
         name: employee.fullName.slice(0, 32).trim(),
         userType: "normal",
+        groupId: deptGroupId,
         Valid: {
           enable: true,
           beginTime: "2026-01-01T00:00:00",
