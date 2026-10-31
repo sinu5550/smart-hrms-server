@@ -2440,30 +2440,27 @@ function createDevicesRouter(prisma) {
               const rawNo = String(u.employeeNo).trim();
               termPersonNameByNo.set(rawNo, u.name || "");
 
-              // Sync biometric permission badges (face & fingerprint) to DB
+              // Sync biometric permission badges (face & fingerprint) to DB accurately reflecting terminal state
               const numOfFace = Number(u.numOfFace || 0);
               const numOfFP = Number(u.numOfFP || 0);
-              if (numOfFace > 0 || numOfFP > 0) {
-                const matchedUser = findUser(rawNo, u.name || "");
-                if (matchedUser && matchedUser.role !== "OWNER") {
-                  const perms = Array.isArray(matchedUser.permissions) ? matchedUser.permissions : [];
-                  let needsUpdate = false;
-                  const newPerms = [...perms];
-                  if (numOfFace > 0 && !newPerms.includes("bio:face")) {
-                    newPerms.push("bio:face");
-                    needsUpdate = true;
-                  }
-                  if (numOfFP > 0 && !newPerms.includes("bio:fingerprint")) {
-                    newPerms.push("bio:fingerprint");
-                    needsUpdate = true;
-                  }
-                  if (needsUpdate) {
-                    await prisma.user.update({
-                      where: { id: matchedUser.id },
-                      data: { permissions: newPerms },
-                    });
-                    matchedUser.permissions = newPerms;
-                  }
+              const matchedUser = findUser(rawNo, u.name || "");
+              if (matchedUser && matchedUser.role !== "OWNER") {
+                const perms = Array.isArray(matchedUser.permissions) ? matchedUser.permissions : [];
+                // Filter out previous bio tags and rebuild strictly from actual terminal enrollment counts
+                const basePerms = perms.filter((p) => typeof p === "string" && !p.startsWith("bio:"));
+                const newPerms = [...basePerms];
+                if (numOfFP > 0) newPerms.push("bio:fingerprint");
+                if (numOfFace > 0) newPerms.push("bio:face");
+
+                const sortedCurrent = [...perms].sort().join(",");
+                const sortedNew = [...newPerms].sort().join(",");
+
+                if (sortedCurrent !== sortedNew) {
+                  await prisma.user.update({
+                    where: { id: matchedUser.id },
+                    data: { permissions: newPerms },
+                  });
+                  matchedUser.permissions = newPerms;
                 }
               }
             }
