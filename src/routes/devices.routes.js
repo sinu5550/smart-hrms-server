@@ -849,14 +849,26 @@ function createDevicesRouter(prisma) {
         return res.status(404).json({ message: "Device not found or IP not configured." });
       }
 
-      // Find target user from database
+      // Find target user from database safely without invalid UUID crashes
+      const isUUID = (val) =>
+        typeof val === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val.trim());
+
+      const searchOr = [];
+      if (employeeDbId && isUUID(employeeDbId)) {
+        searchOr.push({ id: employeeDbId.trim() });
+      }
+      if (employeeId) {
+        searchOr.push({ employeeId: employeeId.trim() });
+        if (isUUID(employeeId)) {
+          searchOr.push({ id: employeeId.trim() });
+        }
+      }
+
       const emp = await prisma.user.findFirst({
         where: {
           organizationId,
-          OR: [
-            ...(employeeDbId ? [{ id: employeeDbId }] : []),
-            ...(employeeId ? [{ employeeId }, { id: employeeId }] : []),
-          ],
+          ...(searchOr.length > 0 ? { OR: searchOr } : {}),
         },
       });
 
