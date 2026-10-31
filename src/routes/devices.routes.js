@@ -271,9 +271,11 @@ function createDevicesRouter(prisma) {
       const [startHour, startMinute] = startTimeStr.split(":").map(Number);
 
       const cutoffMinutes = startHour * 60 + startMinute + graceMinutes;
-      // Convert checkInDate to local hours/minutes (+06:00)
-      const localCheckIn = new Date(checkInDate.getTime() + 6 * 60 * 60 * 1000);
-      const checkInTotalMinutes = localCheckIn.getUTCHours() * 60 + localCheckIn.getUTCMinutes();
+      
+      // Calculate local minutes from midnight in Bangladesh (UTC+6)
+      // checkInDate is a Date instance.
+      const checkIn = new Date(checkInDate);
+      const checkInTotalMinutes = ((checkIn.getUTCHours() + 6) % 24) * 60 + checkIn.getUTCMinutes();
 
       if (checkInTotalMinutes > cutoffMinutes) {
         return "LATE";
@@ -314,8 +316,8 @@ function createDevicesRouter(prisma) {
       const [endHour, endMinute] = endTimeStr.split(":").map(Number);
 
       // Convert checkOutDate to local hours/minutes (+06:00)
-      const localCheckOut = new Date(checkOutDate.getTime() + 6 * 60 * 60 * 1000);
-      const checkOutMins = localCheckOut.getUTCHours() * 60 + localCheckOut.getUTCMinutes();
+      const checkOut = new Date(checkOutDate);
+      const checkOutMins = ((checkOut.getUTCHours() + 6) % 24) * 60 + checkOut.getUTCMinutes();
       const shiftEndMins = endHour * 60 + endMinute;
 
       // Overtime counts only if checkOutMins >= shiftEndMins + thresholdMins
@@ -577,6 +579,97 @@ function createDevicesRouter(prisma) {
         select: { id: true, employeeId: true, fullName: true },
       });
 
+      // Ensure default organization Shift exists or auto-create it
+      let defaultOrgShift = await prisma.officeSetting.findFirst({
+        where: { organizationId },
+      });
+      if (!defaultOrgShift) {
+        defaultOrgShift = await prisma.officeSetting.create({
+          data: {
+            organizationId,
+            shiftName: "Regular Day Shift",
+            startTime: "09:00",
+            endTime: "18:00",
+            gracePeriodMinutes: 30,
+            overtimeThresholdMins: 30,
+            isDefault: true,
+          },
+        });
+      }
+
+      // Pre-fetch existing organization departments for fast in-memory lookup
+      const existingDepts = await prisma.department.findMany({
+        where: { organizationId },
+      });
+      const deptMap = new Map(); // key: lowercase deptName or code -> id
+      existingDepts.forEach((d) => {
+        deptMap.set(d.name.toLowerCase().trim(), d.id);
+        if (d.code) deptMap.set(d.code.toLowerCase().trim(), d.id);
+      });
+
+      // Exact Department mapping according to Hikvision terminal web UI department list:
+      // Group 1: All / General (fallback)
+      // Group 2: Management
+      // Group 3: Customer Service (CS)
+      // Group 4: Account & Financial
+      // Group 5: Marketing & Sales
+      // Group 6: Supply Chain
+      // Group 7: HR & Admin
+      // Group 8: IT & Software
+      const HIKVISION_DEPT_GROUP_MAP = {
+        1: "General",
+        2: "Management",
+        3: "Customer Service (CS)",
+        4: "Account & Financial",
+        5: "Marketing & Sales",
+        6: "Supply Chain",
+        7: "HR & Admin",
+        8: "IT & Software",
+      };
+
+      // Helper to dynamically get or create Department from terminal group exactly as named on machine
+      async function resolveDepartmentId(userItem) {
+        // 1. Check belongGroup or PersonInfoExtends
+        let rawName = (userItem?.belongGroup && userItem.belongGroup.trim()) ? userItem.belongGroup.trim() : "";
+        if (!rawName && Array.isArray(userItem?.PersonInfoExtends)) {
+          const extVal = userItem.PersonInfoExtends.find((e) => e?.value && e.value.trim());
+          if (extVal) rawName = extVal.value.trim();
+        }
+
+        // 2. If belongGroup is empty, map from terminal groupId to exact Department Name from machine UI
+        if (!rawName && userItem?.groupId !== undefined && userItem?.groupId !== null && userItem?.groupId !== "") {
+          const gId = Number(userItem.groupId);
+          if (HIKVISION_DEPT_GROUP_MAP[gId]) {
+            rawName = HIKVISION_DEPT_GROUP_MAP[gId];
+          } else {
+            rawName = `Department ${gId}`;
+          }
+        }
+
+        const candidateName = rawName || "General";
+        const key = candidateName.toLowerCase().trim();
+        if (deptMap.has(key)) return deptMap.get(key);
+
+        const code = `D-${candidateName.slice(0, 4).toUpperCase().replace(/[^A-Z0-9]/g, "")}`;
+        try {
+          const newDept = await prisma.department.create({
+            data: {
+              organizationId,
+              name: candidateName,
+              code: `${code}-${Date.now().toString().slice(-4)}`,
+            },
+          });
+          deptMap.set(key, newDept.id);
+          return newDept.id;
+        } catch (e) {
+          const found = await prisma.department.findFirst({ where: { organizationId, name: candidateName } });
+          if (found) {
+            deptMap.set(key, found.id);
+            return found.id;
+          }
+          return null;
+        }
+      }
 
       for (const item of userList) {
         const rawEmpNo = String(item.employeeNo || "").trim();
@@ -663,6 +756,9 @@ function createDevicesRouter(prisma) {
               }
             }
 
+            // Resolve Department from terminal group exactly as named on machine
+            const resolvedDeptId = await resolveDepartmentId(item);
+
             // Do not overwrite legitimate DB employee name with a placeholder like "Employee 17"
             const updatedFullName = (item.name && item.name.trim()) ? item.name.trim() : existingEmp.fullName;
 
@@ -676,6 +772,8 @@ function createDevicesRouter(prisma) {
                 isDeleted: false,
                 deletedAt: null,
                 status: existingEmp.status === "TERMINATED" ? "ACTIVE" : existingEmp.status,
+                departmentId: existingEmp.departmentId || resolvedDeptId,
+                shiftId: existingEmp.shiftId || defaultOrgShift?.id,
               },
             });
             updatedCount++;
@@ -696,6 +794,8 @@ function createDevicesRouter(prisma) {
               }
             }
 
+            const resolvedDeptId = await resolveDepartmentId(item);
+
             await prisma.user.create({
               data: {
                 organizationId,
@@ -709,6 +809,8 @@ function createDevicesRouter(prisma) {
                 status: "ACTIVE",
                 mustChangePassword: true,
                 permissions: newPerms,
+                departmentId: resolvedDeptId,
+                shiftId: defaultOrgShift?.id,
               },
             });
             importedCount++;
@@ -1412,6 +1514,7 @@ function createDevicesRouter(prisma) {
   router.post("/:id/sync-punches", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
     try {
       const { id } = req.params;
+      const { days } = req.body || {};
       const organizationId = req.user.organizationId;
 
       const device = await prisma.biometricDevice.findFirst({
@@ -1427,14 +1530,26 @@ function createDevicesRouter(prisma) {
       const host = device.ipAddress;
       const path = "/ISAPI/AccessControl/AcsEvent?format=json";
 
-      // 1. Probe total matches first
+      // 1. Determine Start & End Time (Default to last 35 days / from 1st of current month to ensure full history)
+      const now = new Date();
+      const pullDays = typeof days === "number" && days > 0 ? days : 35;
+      const pastDate = new Date(now.getTime() - pullDays * 24 * 60 * 60 * 1000);
+      const startYMD = pastDate.toLocaleDateString("en-CA");
+      const endYMD = now.toLocaleDateString("en-CA");
+
+      const startTime = `${startYMD}T00:00:00`;
+      const endTime = `${endYMD}T23:59:59`;
+
+      // 2. Probe total matches first
       const probeBody = JSON.stringify({
         AcsEventCond: {
-          searchID: "1",
+          searchID: "probe_total",
           searchResultPosition: 0,
           maxResults: 1,
           major: 0,
           minor: 0,
+          startTime,
+          endTime,
         },
       });
 
@@ -1493,23 +1608,20 @@ function createDevicesRouter(prisma) {
       });
 
       if (totalMatches === 0) {
-        return res.status(200).json({ success: true, pulledCount: 0, message: "No event logs found on machine." });
+        return res.status(200).json({ success: true, pulledCount: 0, message: "No event logs found on machine for selected date range." });
       }
 
-      // 2. Query today's events from device with time range and pagination
-      const localTodayYMD = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD
-      const startTime = `${localTodayYMD}T00:00:00`;
-      const endTime = `${localTodayYMD}T23:59:59`;
-
+      // 3. Paginated fetch — pull ALL events across the period (up to 2000 events)
       let eventsList = [];
       let pos = 0;
+      const BATCH_SIZE = 50;
 
       while (true) {
         const fetchBody = JSON.stringify({
           AcsEventCond: {
             searchID: `sync_${Date.now()}`,
             searchResultPosition: pos,
-            maxResults: 30,
+            maxResults: BATCH_SIZE,
             major: 0,
             minor: 0,
             startTime,
@@ -1576,7 +1688,8 @@ function createDevicesRouter(prisma) {
         if (list.length === 0) break;
         eventsList = eventsList.concat(list);
         pos += list.length;
-        if (pos >= (batch?.AcsEvent?.totalMatches || 0) || list.length < 30) break;
+        const total = Number(batch?.AcsEvent?.totalMatches || 0);
+        if (pos >= total || list.length < BATCH_SIZE || pos >= 2000) break;
       }
 
       // Filter events that belong to persons (major: 5, with employeeNoString)
