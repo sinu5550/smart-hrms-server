@@ -711,6 +711,15 @@ function createEmployeesRouter(prisma) {
         permissionsData = { permissions: roleRecord?.permissions || [] };
       }
 
+      let passwordData = {};
+      if (dto.password && typeof dto.password === "string" && dto.password.trim().length >= 6) {
+        const hashedPassword = await bcrypt.hash(dto.password.trim(), 12);
+        passwordData = {
+          passwordHash: hashedPassword,
+          mustChangePassword: false,
+        };
+      }
+
       const updated = await prisma.user.update({
         where: { id },
         data: {
@@ -735,6 +744,7 @@ function createEmployeesRouter(prisma) {
           joiningDate: dto.joiningDate ? new Date(dto.joiningDate) : undefined,
           avatarUrl: dto.avatarUrl,
           attendanceExempt: dto.attendanceExempt !== undefined ? Boolean(dto.attendanceExempt) : undefined,
+          ...passwordData,
           ...permissionsData,
         },
         select: {
