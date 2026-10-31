@@ -2373,8 +2373,10 @@ function createDevicesRouter(prisma) {
           });
         }
 
-        // Automatic Face Sync: Check device for newly enrolled faces and sync to employee avatar
-        try {
+        // Automatic Face Sync: Only check if new biometric punches were detected or if explicitly triggered
+        // This avoids hammering device & Cloudinary API and saves server memory for SaaS scaling
+        if (newRawCount > 0) {
+          try {
           // Helper: make an authenticated HTTPS request to device with Digest Auth
           const deviceRequest = (method, reqPath, bodyStr = null) =>
             new Promise((resolve) => {
@@ -2588,6 +2590,7 @@ function createDevicesRouter(prisma) {
           }
         } catch (faceErr) {
           console.warn(`[Auto-Face] Non-blocking sync error for device ${host}:`, faceErr.message);
+        }
         }
       }
     } catch (err) {
