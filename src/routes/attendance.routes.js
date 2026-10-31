@@ -795,8 +795,8 @@ function createAttendanceRouter(prisma) {
 
       return res.status(200).json({
         organization: {
-          name: org?.name || "Halal Food Service",
-          address: org?.address || "39/A Senpara Parbota, Mirpur 10",
+          name: org?.name || "",
+          address: org?.address || "",
           logoUrl: org?.logoUrl || null,
         },
         reportPeriod: {
