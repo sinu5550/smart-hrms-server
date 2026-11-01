@@ -2186,9 +2186,13 @@ function createDevicesRouter(prisma) {
         });
 
         // Fetch today's events from device with time range and pagination
-        const localTodayYMD = new Date().toLocaleDateString("en-CA");
-        const startTime = `${localTodayYMD}T00:00:00`;
-        const endTime = `${localTodayYMD}T23:59:59`;
+        // Fetch recent days events (last 7 days) from device
+        const now = new Date();
+        const pastDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const startYMD = pastDate.toLocaleDateString("en-CA");
+        const endYMD = now.toLocaleDateString("en-CA");
+        const startTime = `${startYMD}T00:00:00`;
+        const endTime = `${endYMD}T23:59:59`;
 
         let eventsList = [];
         let pos = 0;
