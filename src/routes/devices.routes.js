@@ -2184,15 +2184,27 @@ function createDevicesRouter(prisma) {
           req1.on("timeout", () => { req1.destroy(); resolve(0); });
           req1.end();
         });
+        // Intelligent Catch-up Sync:
+        // Automatically check the last punch saved in DB for this device.
+        // If DB has old logs, start syncing from the last recorded date up to today (covering months/year of offline gap!).
+        // If brand new or empty, default to 365 days (1 full year) of history.
+        const latestDbLog = await prisma.biometricRawLog.findFirst({
+          where: { deviceSerialNumber: dev.deviceSerialNumber },
+          orderBy: { punchTime: "desc" },
+          select: { punchTime: true },
+        });
 
-        // Fetch today's events from device with time range and pagination
-        // Fetch recent days events (last 7 days) from device
         const now = new Date();
-        const pastDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        const startYMD = pastDate.toLocaleDateString("en-CA");
+        const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+        const syncStartDate = latestDbLog?.punchTime
+          ? new Date(Math.max(oneYearAgo.getTime(), latestDbLog.punchTime.getTime() - 24 * 60 * 60 * 1000))
+          : oneYearAgo;
+
+        const startYMD = syncStartDate.toLocaleDateString("en-CA");
         const endYMD = now.toLocaleDateString("en-CA");
         const startTime = `${startYMD}T00:00:00`;
         const endTime = `${endYMD}T23:59:59`;
+
 
         let eventsList = [];
         let pos = 0;
