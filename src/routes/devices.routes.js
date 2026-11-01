@@ -1721,7 +1721,7 @@ function createDevicesRouter(prisma) {
       // Filter events that belong to persons (major: 5, with employeeNoString)
       // Minor codes: 75=Face, 38=Fingerprint, 1=Card, 104=Face/FP
       const personEvents = eventsList.filter(
-        (e) => e.major === 5 && (e.minor === 75 || e.minor === 38 || e.minor === 104 || e.minor === 1) && e.employeeNoString
+        (e) => e.major === 5 && (e.minor === 75 || e.minor === 38 || e.minor === 1) && e.employeeNoString
       );
 
       // Cache all users in this organization for fast and accurate employee matching
@@ -1776,8 +1776,7 @@ function createDevicesRouter(prisma) {
         if (ev.minor === 75) verificationMode = "FACE_SCAN";
         else if (ev.minor === 38) verificationMode = "FINGERPRINT";
         else if (ev.minor === 1) verificationMode = "CARD";
-        else if (ev.minor === 104) verificationMode = "FACE_SCAN";
-
+        
         const userRec = findUserForRawEmp(rawEmp);
         if (!userRec) continue;
 
@@ -2257,7 +2256,7 @@ function createDevicesRouter(prisma) {
         }
 
         const personEvents = eventsList.filter(
-          (e) => e.major === 5 && (e.minor === 75 || e.minor === 38 || e.minor === 104 || e.minor === 1) && e.employeeNoString
+          (e) => e.major === 5 && (e.minor === 75 || e.minor === 38 || e.minor === 1) && e.employeeNoString
         );
 
         if (personEvents.length === 0) continue;
@@ -2309,8 +2308,7 @@ function createDevicesRouter(prisma) {
           if (ev.minor === 75) verificationMode = "FACE_SCAN";
           else if (ev.minor === 38) verificationMode = "FINGERPRINT";
           else if (ev.minor === 1) verificationMode = "CARD";
-          else if (ev.minor === 104) verificationMode = "FACE_SCAN";
-
+          
           const userRec = findUser(ev.employeeNoString);
           if (!userRec) continue;
 
