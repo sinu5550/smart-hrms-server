@@ -2,6 +2,9 @@ const express = require("express");
 const crypto = require("crypto");
 const http = require("http");
 const https = require("https");
+const path = require("path");
+const fs = require("fs");
+const archiver = require("archiver");
 const QRCode = require("qrcode");
 const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
 
@@ -135,6 +138,65 @@ function createDevicesRouter(prisma) {
 
       const deleted = await prisma.biometricDevice.delete({ where: { id } });
       return res.status(200).json(deleted);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/devices/:id/download-agent (Download customized pre-configured agent zip for this device)
+  router.get("/:id/download-agent", authenticateToken, requirePermissions(prisma, "devices.view"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+      if (!device) {
+        return res.status(404).json({ message: "Device not found." });
+      }
+
+      // Root path to smart-hrm-agent source
+      const agentDir = path.resolve(__dirname, "../../../smart-hrm-agent");
+      if (!fs.existsSync(agentDir)) {
+        return res.status(500).json({ message: "Agent base template not found on server." });
+      }
+
+      // Prepare custom config.json payload for this exact device
+      const customConfig = {
+        cloudApiUrl: process.env.API_BASE_URL || "https://secure-api.creativeboxbd.com",
+        deviceIp: device.ipAddress || "192.168.68.69",
+        devicePort: device.port || 443,
+        deviceUsername: device.username || "admin",
+        devicePassword: device.password || "",
+        deviceSerialNumber: device.deviceSerialNumber || "",
+        pollIntervalSeconds: 8,
+      };
+
+      const safeDeviceName = (device.deviceName || "device").replace(/[^a-zA-Z0-9_-]/g, "_");
+      const zipFileName = `SmartHRM-Agent-${safeDeviceName}.zip`;
+
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${zipFileName}"`);
+
+      const archive = archiver("zip", { zlib: { level: 6 } });
+      archive.on("error", (err) => {
+        console.error("Archive error:", err);
+        if (!res.headersSent) res.status(500).send("Error generating zip");
+      });
+
+      archive.pipe(res);
+
+      // Append all agent files except config.json
+      archive.glob("**/*", {
+        cwd: agentDir,
+        ignore: ["config.json"],
+      });
+
+      // Inject dynamically generated config.json with this device's credentials
+      archive.append(JSON.stringify(customConfig, null, 2), { name: "config.json" });
+
+      await archive.finalize();
     } catch (err) {
       next(err);
     }
