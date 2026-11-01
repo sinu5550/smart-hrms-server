@@ -4,7 +4,7 @@ const http = require("http");
 const https = require("https");
 const path = require("path");
 const fs = require("fs");
-const archiver = require("archiver");
+const AdmZip = require("adm-zip");
 const QRCode = require("qrcode");
 const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
 
@@ -156,10 +156,16 @@ function createDevicesRouter(prisma) {
         return res.status(404).json({ message: "Device not found." });
       }
 
-      // Root path to smart-hrm-agent source
-      const agentDir = path.resolve(__dirname, "../../../smart-hrm-agent");
-      if (!fs.existsSync(agentDir)) {
-        return res.status(500).json({ message: "Agent base template not found on server." });
+      // Find base agent zip (pre-bundled with portable node & scripts)
+      const possibleZipPaths = [
+        path.resolve(__dirname, "../../assets/base-agent.zip"),
+        path.resolve(__dirname, "../../../hrms-frontend/public/downloads/SmartHRM-Biometric-Agent.zip"),
+        path.resolve(process.cwd(), "assets/base-agent.zip"),
+      ];
+      let baseZipPath = possibleZipPaths.find((p) => fs.existsSync(p));
+
+      if (!baseZipPath) {
+        return res.status(500).json({ message: "Agent base package not found on server." });
       }
 
       // Prepare custom config.json payload for this exact device
@@ -176,28 +182,23 @@ function createDevicesRouter(prisma) {
       const safeDeviceName = (device.deviceName || "device").replace(/[^a-zA-Z0-9_-]/g, "_");
       const zipFileName = `SmartHRM-Agent-${safeDeviceName}.zip`;
 
+      const zip = new AdmZip(baseZipPath);
+      // Replace existing config.json with custom device config
+      try {
+        zip.deleteFile("config.json");
+      } catch {
+        // config.json may not exist or have different case
+      }
+      zip.addFile("config.json", Buffer.from(JSON.stringify(customConfig, null, 2), "utf8"));
+
+      const zipBuffer = zip.toBuffer();
+
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("Content-Disposition", `attachment; filename="${zipFileName}"`);
-
-      const archive = archiver("zip", { zlib: { level: 6 } });
-      archive.on("error", (err) => {
-        console.error("Archive error:", err);
-        if (!res.headersSent) res.status(500).send("Error generating zip");
-      });
-
-      archive.pipe(res);
-
-      // Append all agent files except config.json
-      archive.glob("**/*", {
-        cwd: agentDir,
-        ignore: ["config.json"],
-      });
-
-      // Inject dynamically generated config.json with this device's credentials
-      archive.append(JSON.stringify(customConfig, null, 2), { name: "config.json" });
-
-      await archive.finalize();
+      res.setHeader("Content-Length", zipBuffer.length);
+      return res.end(zipBuffer);
     } catch (err) {
+      console.error("[Download Agent Error]", err);
       next(err);
     }
   });
