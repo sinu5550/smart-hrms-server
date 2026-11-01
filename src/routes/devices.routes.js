@@ -2091,10 +2091,13 @@ function createDevicesRouter(prisma) {
   // Automatic Background Poller: Periodically sync punches every 30 seconds
   // Automatically detects when someone scans face or finger at the machine
   // -------------------------------------------------------------------------
-  async function pollAllOnlineDevices() {
+  async function pollAllOnlineDevices(targetOrgId = null) {
     try {
       const activeDevices = await prisma.biometricDevice.findMany({
-        where: { ipAddress: { not: null } },
+        where: {
+          ipAddress: { not: null },
+          ...(targetOrgId ? { organizationId: targetOrgId } : {}),
+        },
       });
 
       for (const dev of activeDevices) {
@@ -2708,15 +2711,18 @@ function createDevicesRouter(prisma) {
     }
   });
 
-    // Background Sync: Automatically pull recent punches from all active reachable terminals every 15 seconds
-  setInterval(() => {
-    pollAllOnlineDevices().catch((e) => console.warn("[Auto-Poll Sync Notice]", e.message));
-  }, 15000);
-
-  // Trigger one immediate cycle on server start
-  setTimeout(() => {
-    pollAllOnlineDevices().catch((e) => console.warn("[Auto-Poll Init Notice]", e.message));
-  }, 2000);
+  
+  // POST /api/devices/sync-all
+  // On-demand: sync recent attendance punches from physical devices for current organization
+  router.post("/sync-all", authenticateToken, async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      await pollAllOnlineDevices(organizationId);
+      return res.status(200).json({ success: true, message: "Attendance synced successfully from devices." });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   return router;
 }
