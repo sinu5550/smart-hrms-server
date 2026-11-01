@@ -1994,14 +1994,21 @@ function createDevicesRouter(prisma) {
         select: { id: true, employeeId: true, fullName: true },
       });
       
-      const user = allUsers.find((u) => {
-        const uClean = (u.employeeId || "").trim();
-        const uNoDash = uClean.replace(/-/g, "");
-        if (uClean === cleanEmpId || uNoDash === noDashEmpId) return true;
-        if (uClean.endsWith(cleanEmpId) || uClean.endsWith(noZeros)) return true;
-        if (uNoDash.endsWith(cleanEmpId) || uNoDash.endsWith(noZeros)) return true;
-        return false;
-      });
+      // Exact and precise matching:
+      // 1. Exact match on employeeId
+      let user = allUsers.find((u) => (u.employeeId || "").trim() === cleanEmpId || (u.employeeId || "").replace(/-/g, "") === noDashEmpId);
+      // 2. Dash-delimited suffix match (e.g. EKH-26-0004 or EKH-26-4 matching "4" or "0004")
+      if (!user) {
+        user = allUsers.find((u) => {
+          const parts = (u.employeeId || "").split("-");
+          if (parts.length > 1) {
+            const suffix = parts[parts.length - 1].trim();
+            const suffixNoZero = suffix.replace(/^0+/, "");
+            return suffix === cleanEmpId || suffixNoZero === noZeros;
+          }
+          return false;
+        });
+      }
 
       if (!user) {
         return res.status(404).json({
