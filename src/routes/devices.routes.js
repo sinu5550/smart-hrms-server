@@ -2708,6 +2708,16 @@ function createDevicesRouter(prisma) {
     }
   });
 
+    // Background Sync: Automatically pull recent punches from all active reachable terminals every 15 seconds
+  setInterval(() => {
+    pollAllOnlineDevices().catch((e) => console.warn("[Auto-Poll Sync Notice]", e.message));
+  }, 15000);
+
+  // Trigger one immediate cycle on server start
+  setTimeout(() => {
+    pollAllOnlineDevices().catch((e) => console.warn("[Auto-Poll Init Notice]", e.message));
+  }, 2000);
+
   return router;
 }
 
