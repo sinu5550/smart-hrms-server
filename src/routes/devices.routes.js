@@ -1984,17 +1984,23 @@ function createDevicesRouter(prisma) {
           message: `Unregistered hardware device serial: ${serialNumber}`,
         });
       }
-
-      // 3. Find user in the same organization (by employeeId or national ID/card)
+      // 3. Find user in the same organization (by employeeId, stripped dashes, or suffix)
       const cleanEmpId = String(employeeId).trim();
-      const user = await prisma.user.findFirst({
-        where: {
-          organizationId: device.organizationId,
-          OR: [
-            { employeeId: cleanEmpId },
-            { employeeId: { endsWith: cleanEmpId } },
-          ],
-        },
+      const noDashEmpId = cleanEmpId.replace(/-/g, "");
+      const noZeros = cleanEmpId.replace(/^0+/, "");
+      
+      const allUsers = await prisma.user.findMany({
+        where: { organizationId: device.organizationId },
+        select: { id: true, employeeId: true, fullName: true },
+      });
+      
+      const user = allUsers.find((u) => {
+        const uClean = (u.employeeId || "").trim();
+        const uNoDash = uClean.replace(/-/g, "");
+        if (uClean === cleanEmpId || uNoDash === noDashEmpId) return true;
+        if (uClean.endsWith(cleanEmpId) || uClean.endsWith(noZeros)) return true;
+        if (uNoDash.endsWith(cleanEmpId) || uNoDash.endsWith(noZeros)) return true;
+        return false;
       });
 
       if (!user) {
