@@ -2516,9 +2516,25 @@ function createDevicesRouter(prisma) {
 
         // Automatic Biometric Status Sync: Always keep employee bio badges 100% matched with terminal hardware!
         try {
-          // Helper: make an authenticated HTTPS request to device with Digest Auth
-          const deviceRequest = (method, reqPath, bodyStr = null) =>
-            new Promise((resolve) => {
+          // Helper: make an authenticated request to device (prioritizes reverse tunnel)
+          const deviceRequest = async (method, reqPath, bodyStr = null) => {
+            if (isDeviceTunnelOnline(dev.deviceSerialNumber)) {
+              try {
+                const resp = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
+                  method,
+                  path: reqPath,
+                  body: bodyStr,
+                  timeout: 8000,
+                });
+                if (resp && resp.data) {
+                  return Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data));
+                }
+              } catch (e) {
+                // fall through to direct network
+              }
+            }
+
+            return new Promise((resolve) => {
               const bodyBuf = bodyStr ? Buffer.from(bodyStr) : null;
               const headers = { "Content-Type": "application/json" };
               if (bodyBuf) headers["Content-Length"] = bodyBuf.length;
@@ -2559,6 +2575,7 @@ function createDevicesRouter(prisma) {
               if (bodyBuf) req1.write(bodyBuf);
               req1.end();
             });
+          };
 
           // Step 1: Fetch terminal UserInfo to reconcile fingerprint & face counts for ALL users
           const termPersonNameByNo = new Map();
