@@ -32,6 +32,11 @@ function setupDeviceTunnelServer(httpServer) {
     console.log(`[Tunnel Connected] Local agent for device serial "${serial}" established live bridge.`);
     activeTunnels.set(serial, ws);
 
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+    });
+
     ws.on("message", (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
@@ -119,3 +124,4 @@ module.exports = {
   sendDeviceCommandViaTunnel,
   isDeviceTunnelOnline,
 };
+
