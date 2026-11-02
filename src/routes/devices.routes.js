@@ -7,6 +7,7 @@ const fs = require("fs");
 const AdmZip = require("adm-zip");
 const QRCode = require("qrcode");
 const { authenticateToken, requireRoles, requirePermissions } = require("../middleware");
+const { sendDeviceCommandViaTunnel, isDeviceTunnelOnline } = require("../device-tunnel");
 
 function createDevicesRouter(prisma) {
   const router = express.Router();
@@ -980,8 +981,23 @@ function createDevicesRouter(prisma) {
         },
       });
 
-      // Execute PUT with Digest Auth
-      const pushResult = await new Promise((resolve, reject) => {
+      // Execute PUT with Tunnel or Direct
+      let pushResult = null;
+      if (isDeviceTunnelOnline(device.deviceSerialNumber)) {
+        try {
+          const tunnelResp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+            method: "PUT",
+            path,
+            body: setupPayload,
+          });
+          pushResult = { statusCode: 200, data: tunnelResp.data };
+        } catch (tErr) {
+          console.warn("[Tunnel Push Failed, falling back to direct]", tErr.message);
+        }
+      }
+
+      if (!pushResult) {
+        pushResult = await new Promise((resolve, reject) => {
         const req1 = https.request(
           {
             hostname: host,
@@ -1032,6 +1048,7 @@ function createDevicesRouter(prisma) {
         req1.on("error", reject);
         req1.end();
       });
+      }
 
       // If employee has an avatar photo, also push the face image to the terminal
       if (emp.avatarUrl && emp.avatarUrl.startsWith("http")) {

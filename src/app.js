@@ -15,6 +15,7 @@ const { createCoreHrRouter } = require("./routes/core-hr.routes");
 const { createOutworkRouter } = require("./routes/outwork.routes");
 const { createLoansRouter } = require("./routes/loans.routes");
 const { createLeaveRouter } = require("./routes/leave.routes");
+const { setupDeviceTunnelServer } = require("./device-tunnel");
 
 const app = express();
 
@@ -103,9 +104,10 @@ app.use((err, _req, res, _next) => {
 module.exports = app;
 
 if (require.main === module) {
-  const port = process.env.PORT || 3000;
-  app.listen(port, () => {
+  const port = process.env.PORT || 7000;
+  const server = app.listen(port, () => {
     console.log(`Enterprise HRMS Backend (Node.js/Express) live on port ${port}`);
   });
+  setupDeviceTunnelServer(server);
 }
 
