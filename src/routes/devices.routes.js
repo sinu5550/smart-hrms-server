@@ -2133,14 +2133,19 @@ function createDevicesRouter(prisma) {
             punchInAddress: device.locationName,
           },
         });
-      } else if (existingAttendance.currentState !== "CHECKED_OUT") {
+      } else if (
+        verificationMode === "FINGERPRINT" &&
+        existingAttendance.checkInTime &&
+        punchDate.getTime() > existingAttendance.checkInTime.getTime() + 60000
+      ) {
+        // Only genuine FINGERPRINT punches mark Check-Out after check-in!
         const elapsedMinutes = Math.max(
           0,
           Math.round((punchDate.getTime() - existingAttendance.checkInTime.getTime()) / (1000 * 60))
         );
         const totalWorkMinutes = Math.max(
           0,
-          elapsedMinutes - existingAttendance.totalBreakMinutes
+          elapsedMinutes - (existingAttendance.totalBreakMinutes || 0)
         );
         const overtimeMinutes = await determineOvertimeMinutes(device.organizationId, user.id, punchDate);
 
