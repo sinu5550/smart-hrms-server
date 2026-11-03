@@ -178,6 +178,66 @@ function createDepartmentsRouter(prisma) {
     }
   });
 
+  // PATCH /api/departments/:id/employee-shift
+  // Allows Admin, HR or Department Head to assign/change an employee's shift within permitted roster department
+  router.patch("/:id/employee-shift", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { employeeUserId, shiftId } = req.body || {};
+      const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+      const userRole = req.user.role;
+
+      const dept = await prisma.department.findFirst({ where: { id, organizationId } });
+      if (!dept) {
+        return res.status(404).json({ message: "Department not found." });
+      }
+
+      // Check permission: Must be ADMIN, HR, or Head of this Department
+      const isDeptHead = dept.headUserId === callerUserId;
+      const isManager = userRole === "OWNER" || userRole === "ADMIN" || userRole === "HR" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
+      if (!isDeptHead && !isManager) {
+        return res.status(403).json({ message: "Only Department Head, HR or Admin can assign employee shifts." });
+      }
+
+      const emp = await prisma.user.findFirst({
+        where: { id: employeeUserId, organizationId, departmentId: id },
+      });
+      if (!emp) {
+        return res.status(404).json({ message: "Employee not found in this department." });
+      }
+
+      if (shiftId) {
+        const targetShift = await prisma.officeSetting.findFirst({
+          where: { id: shiftId, organizationId },
+        });
+        if (!targetShift) {
+          return res.status(400).json({ message: "Selected shift schedule not found." });
+        }
+      }
+
+      const updated = await prisma.user.update({
+        where: { id: employeeUserId },
+        data: {
+          shiftId: shiftId || null,
+        },
+        select: {
+          id: true,
+          fullName: true,
+          employeeId: true,
+          shiftId: true,
+          shift: {
+            select: { id: true, shiftName: true, startTime: true, endTime: true },
+          },
+        },
+      });
+
+      return res.status(200).json({ success: true, employee: updated });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // PATCH /api/departments/:id/employee-roster-offdays
   // Allows Admin, HR or Department Head to configure specific weekly off-days for an employee in this department
   router.patch("/:id/employee-roster-offdays", async (req, res, next) => {
