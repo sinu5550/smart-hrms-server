@@ -352,7 +352,12 @@ function createDevicesRouter(prisma) {
   }
 
   // Calculate Overtime Minutes based on user's shift settings and punch-out time
-  async function determineOvertimeMinutes(organizationId, userId, checkOutDate) {
+  // RULES:
+  // 1. Check user's assigned shift or default org shift.
+  // 2. Calculate the required shift duty duration in minutes (shiftEnd - shiftStart).
+  // 3. User's total work minutes must meet or exceed this required duty duration first!
+  // 4. Overtime starts only after duty duration is fulfilled AND after the admin overtimeThresholdMins buffer has passed.
+  async function determineOvertimeMinutes(organizationId, userId, checkOutDate, totalWorkMinutes = null) {
     try {
       const user = await prisma.user.findUnique({
         where: { id: userId },
@@ -375,16 +380,42 @@ function createDevicesRouter(prisma) {
         });
       }
 
+      const startTimeStr = setting?.startTime || "09:00";
       const endTimeStr = setting?.endTime || "18:00";
       const thresholdMins = typeof setting?.overtimeThresholdMins === "number" ? setting.overtimeThresholdMins : 30;
+
+      const [startHour, startMinute] = startTimeStr.split(":").map(Number);
       const [endHour, endMinute] = endTimeStr.split(":").map(Number);
 
+      const shiftStartMins = startHour * 60 + startMinute;
+      let shiftEndMins = endHour * 60 + endMinute;
+      if (shiftEndMins < shiftStartMins) {
+        // Overnight shift (e.g., 20:00 to 05:00)
+        shiftEndMins += 24 * 60;
+      }
+      const requiredDutyMinutes = Math.max(60, shiftEndMins - shiftStartMins);
+
+      // Rule A: If totalWorkMinutes is provided, employee MUST fulfill required duty duration first!
+      if (typeof totalWorkMinutes === "number" && totalWorkMinutes < requiredDutyMinutes) {
+        return 0;
+      }
+
+      // Rule B: Calculate minutes beyond the shift duration / checkout threshold
       // Convert checkOutDate to local hours/minutes (+06:00)
       const checkOut = new Date(checkOutDate);
       const checkOutMins = ((checkOut.getUTCHours() + 6) % 24) * 60 + checkOut.getUTCMinutes();
-      const shiftEndMins = endHour * 60 + endMinute;
 
-      // Overtime counts only if checkOutMins >= shiftEndMins + thresholdMins
+      // Effective duty minutes worked beyond required hours
+      if (typeof totalWorkMinutes === "number") {
+        const extraMinutes = totalWorkMinutes - requiredDutyMinutes;
+        // Overtime counts only if extraMinutes >= thresholdMins
+        if (extraMinutes >= thresholdMins) {
+          return extraMinutes;
+        }
+        return 0;
+      }
+
+      // Fallback: If totalWorkMinutes not provided, check against wall-clock shift end
       if (checkOutMins >= shiftEndMins + thresholdMins) {
         return checkOutMins - shiftEndMins;
       }
@@ -1927,7 +1958,7 @@ function createDevicesRouter(prisma) {
             Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))
           );
           const totalWorkMinutes = Math.max(0, elapsedMinutes - (existingAtt.totalBreakMinutes || 0));
-          const overtimeMinutes = await determineOvertimeMinutes(organizationId, userRec.id, punchDate);
+          const overtimeMinutes = await determineOvertimeMinutes(organizationId, userRec.id, punchDate, totalWorkMinutes);
 
           await prisma.attendance.update({
             where: { id: existingAtt.id },
@@ -2164,7 +2195,7 @@ function createDevicesRouter(prisma) {
           0,
           elapsedMinutes - (existingAttendance.totalBreakMinutes || 0)
         );
-        const overtimeMinutes = await determineOvertimeMinutes(device.organizationId, user.id, punchDate);
+        const overtimeMinutes = await determineOvertimeMinutes(device.organizationId, user.id, punchDate, totalWorkMinutes);
 
         await prisma.attendance.update({
           where: { id: existingAttendance.id },
@@ -2488,7 +2519,7 @@ function createDevicesRouter(prisma) {
               Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))
             );
             const totalWorkMinutes = Math.max(0, elapsedMinutes - (existingAtt.totalBreakMinutes || 0));
-            const overtimeMinutes = await determineOvertimeMinutes(dev.organizationId, userRec.id, punchDate);
+            const overtimeMinutes = await determineOvertimeMinutes(dev.organizationId, userRec.id, punchDate, totalWorkMinutes);
 
             await prisma.attendance.update({
               where: { id: existingAtt.id },

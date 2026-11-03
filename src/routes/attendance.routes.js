@@ -40,7 +40,12 @@ function createAttendanceRouter(prisma) {
   }
 
   // Calculate Overtime Minutes based on user's shift settings and check-out time
-  async function calculateOvertimeMinutes(organizationId, userId, checkOutDate) {
+  // RULES:
+  // 1. Check user's assigned shift or default org shift.
+  // 2. Calculate the required shift duty duration in minutes (shiftEnd - shiftStart).
+  // 3. User's total work minutes must meet or exceed this required duty duration first!
+  // 4. Overtime starts only after duty duration is fulfilled AND after the admin overtimeThresholdMins buffer has passed.
+  async function calculateOvertimeMinutes(organizationId, userId, checkOutDate, totalWorkMinutes = null) {
     try {
       const user = await prisma.user.findUnique({
         where: { id: userId },
@@ -63,16 +68,37 @@ function createAttendanceRouter(prisma) {
         });
       }
 
+      const startTimeStr = setting?.startTime || "09:00";
       const endTimeStr = setting?.endTime || "18:00";
       const thresholdMins = typeof setting?.overtimeThresholdMins === "number" ? setting.overtimeThresholdMins : 30;
+
+      const [startHour, startMinute] = startTimeStr.split(":").map(Number);
       const [endHour, endMinute] = endTimeStr.split(":").map(Number);
 
-      // Local Bangladesh time offset +06:00
+      const shiftStartMins = startHour * 60 + startMinute;
+      let shiftEndMins = endHour * 60 + endMinute;
+      if (shiftEndMins < shiftStartMins) {
+        // Overnight shift (e.g. 20:00 to 05:00)
+        shiftEndMins += 24 * 60;
+      }
+      const requiredDutyMinutes = Math.max(60, shiftEndMins - shiftStartMins);
+
+      // Rule A: Employee MUST fulfill required duty duration first!
+      if (typeof totalWorkMinutes === "number" && totalWorkMinutes < requiredDutyMinutes) {
+        return 0;
+      }
+
+      // Rule B: Overtime calculated only for duration beyond shift duty hours and after threshold
+      if (typeof totalWorkMinutes === "number") {
+        const extraMinutes = totalWorkMinutes - requiredDutyMinutes;
+        if (extraMinutes >= thresholdMins) {
+          return extraMinutes;
+        }
+        return 0;
+      }
+
       const localCheckOut = new Date(checkOutDate.getTime() + 6 * 60 * 60 * 1000);
       const checkOutMins = localCheckOut.getUTCHours() * 60 + localCheckOut.getUTCMinutes();
-      const shiftEndMins = endHour * 60 + endMinute;
-
-      // Overtime counts only if checkOutMins >= shiftEndMins + thresholdMins
       if (checkOutMins >= shiftEndMins + thresholdMins) {
         return checkOutMins - shiftEndMins;
       }
@@ -398,7 +424,8 @@ function createAttendanceRouter(prisma) {
           const overtimeMinutes = await calculateOvertimeMinutes(
             req.user.organizationId,
             req.user.userId,
-            now
+            now,
+            totalWorkMinutes
           );
 
           return tx.attendance.update({
