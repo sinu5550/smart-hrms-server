@@ -862,3 +862,19 @@ model EmployeeRegistration {
   @@index([organizationId, status])
   @@map("employee_registrations")
 }
+
+model SystemUpdateRelease {
+  id           String    @id @default(uuid()) @db.Uuid
+  versionCode  Int       @map("version_code")
+  versionName  String    @map("version_name")
+  patchZipUrl  String    @map("patch_zip_url") @db.Text
+  fileSizeMb   Float     @default(0) @map("file_size_mb")
+  releaseNotes String?   @map("release_notes") @db.Text
+  isMandatory  Boolean   @default(false) @map("is_mandatory")
+  releasedAt   DateTime  @default(now()) @map("released_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@index([versionCode])
+  @@map("system_update_releases")
+}
