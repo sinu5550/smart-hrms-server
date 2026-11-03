@@ -88,19 +88,20 @@ function createAttendanceRouter(prisma) {
         return 0;
       }
 
-      // Rule B: Overtime calculated only for duration beyond shift duty hours and after threshold
+      // Rule B: Overtime calculated only for duration beyond shift duty hours minus threshold buffer
       if (typeof totalWorkMinutes === "number") {
         const extraMinutes = totalWorkMinutes - requiredDutyMinutes;
-        if (extraMinutes >= thresholdMins) {
-          return extraMinutes;
+        // If extra work exceeds buffer (e.g. 40 mins extra with 30 min buffer), overtime is 40 - 30 = 10 mins!
+        if (extraMinutes > thresholdMins) {
+          return extraMinutes - thresholdMins;
         }
         return 0;
       }
 
       const localCheckOut = new Date(checkOutDate.getTime() + 6 * 60 * 60 * 1000);
       const checkOutMins = localCheckOut.getUTCHours() * 60 + localCheckOut.getUTCMinutes();
-      if (checkOutMins >= shiftEndMins + thresholdMins) {
-        return checkOutMins - shiftEndMins;
+      if (checkOutMins > shiftEndMins + thresholdMins) {
+        return checkOutMins - shiftEndMins - thresholdMins;
       }
       return 0;
     } catch (e) {

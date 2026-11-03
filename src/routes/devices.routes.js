@@ -405,19 +405,19 @@ function createDevicesRouter(prisma) {
       const checkOut = new Date(checkOutDate);
       const checkOutMins = ((checkOut.getUTCHours() + 6) % 24) * 60 + checkOut.getUTCMinutes();
 
-      // Effective duty minutes worked beyond required hours
+      // Effective duty minutes worked beyond required hours minus threshold buffer
       if (typeof totalWorkMinutes === "number") {
         const extraMinutes = totalWorkMinutes - requiredDutyMinutes;
-        // Overtime counts only if extraMinutes >= thresholdMins
-        if (extraMinutes >= thresholdMins) {
-          return extraMinutes;
+        // If extra work exceeds buffer (e.g. 40 mins extra with 30 min buffer), overtime is 40 - 30 = 10 mins!
+        if (extraMinutes > thresholdMins) {
+          return extraMinutes - thresholdMins;
         }
         return 0;
       }
 
       // Fallback: If totalWorkMinutes not provided, check against wall-clock shift end
-      if (checkOutMins >= shiftEndMins + thresholdMins) {
-        return checkOutMins - shiftEndMins;
+      if (checkOutMins > shiftEndMins + thresholdMins) {
+        return checkOutMins - shiftEndMins - thresholdMins;
       }
       return 0;
     } catch (e) {
