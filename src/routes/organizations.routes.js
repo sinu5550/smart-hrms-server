@@ -501,6 +501,9 @@ function createOrganizationsRouter(prisma) {
       const phone = (dto.phone || "").trim();
       const password = (dto.password || "").trim();
 
+      if (!dto.avatarUrl) {
+        return res.status(400).json({ message: "Profile Photo is required. Please upload a photo." });
+      }
       if (!fullName) {
         return res.status(400).json({ message: "Full Name is required." });
       }
