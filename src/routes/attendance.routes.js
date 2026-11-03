@@ -128,7 +128,23 @@ function createAttendanceRouter(prisma) {
 
       const user = await prisma.user.findUnique({
         where: { id: req.user.userId },
-        select: { attendanceExempt: true, role: true, organization: { select: { ownerEmail: true } } },
+        select: {
+          attendanceExempt: true,
+          role: true,
+          departmentId: true,
+          rosterOffDays: true,
+          shiftId: true,
+          shift: {
+            select: { id: true, shiftName: true, startTime: true, endTime: true, gracePeriodMinutes: true },
+          },
+          organization: {
+            select: {
+              ownerEmail: true,
+              hasRosterDuty: true,
+              rosterDepartmentIds: true,
+            },
+          },
+        },
       });
       const isOwner = Boolean(
         user?.role === "OWNER" ||
@@ -136,12 +152,41 @@ function createAttendanceRouter(prisma) {
       );
       const isExempt = Boolean(isOwner || user?.attendanceExempt);
 
+      // Check if employee is in a Roster-enabled Department
+      const orgHasRoster = Boolean(user?.organization?.hasRosterDuty);
+      const rosterDeptIds = Array.isArray(user?.organization?.rosterDepartmentIds)
+        ? user.organization.rosterDepartmentIds
+        : [];
+      const isRosterEmployee = Boolean(orgHasRoster && user?.departmentId && rosterDeptIds.includes(user.departmentId));
+
+      let shiftInfo = user?.shift || null;
+      if (!shiftInfo && req.user.organizationId) {
+        shiftInfo = await prisma.officeSetting.findFirst({
+          where: { organizationId: req.user.organizationId, isDefault: true },
+          select: { id: true, shiftName: true, startTime: true, endTime: true, gracePeriodMinutes: true },
+        }) || await prisma.officeSetting.findFirst({
+          where: { organizationId: req.user.organizationId },
+          select: { id: true, shiftName: true, startTime: true, endTime: true, gracePeriodMinutes: true },
+        });
+      }
+
+      const rosterDetails = isRosterEmployee
+        ? {
+            isRosterEmployee: true,
+            shiftName: shiftInfo?.shiftName || "Standard Shift",
+            startTime: shiftInfo?.startTime || "09:00",
+            endTime: shiftInfo?.endTime || "18:00",
+            offDays: Array.isArray(user?.rosterOffDays) ? user.rosterOffDays : [],
+          }
+        : null;
+
       if (!attendance) {
         return res.status(200).json({
           checkedIn: false,
           checkedOut: false,
           attendance: null,
           isExempt,
+          rosterDetails,
         });
       }
 
@@ -150,6 +195,7 @@ function createAttendanceRouter(prisma) {
         checkedOut: attendance.currentState === "CHECKED_OUT",
         attendance,
         isExempt,
+        rosterDetails,
       });
     } catch (err) {
       next(err);
