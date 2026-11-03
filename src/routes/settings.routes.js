@@ -161,6 +161,32 @@ function createSettingsRouter(prisma) {
     }
   });
 
+  // POST /api/shifts/bulk-overtime-threshold (Set global overtime threshold across all organization shifts)
+  router.post("/bulk-overtime-threshold", requireRoles("HR", "ADMIN"), async (req, res, next) => {
+    try {
+      const { overtimeThresholdMins } = req.body || {};
+      const organizationId = req.user.organizationId;
+
+      const mins = Number(overtimeThresholdMins);
+      if (isNaN(mins) || mins < 0) {
+        return res.status(400).json({ message: "Invalid overtime threshold minutes." });
+      }
+
+      await prisma.officeSetting.updateMany({
+        where: { organizationId },
+        data: { overtimeThresholdMins: mins },
+      });
+
+      return res.status(200).json({
+        success: true,
+        overtimeThresholdMins: mins,
+        message: `Overtime threshold buffer set to ${mins} minutes across all shifts successfully.`,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // DELETE /api/shifts/:id
   router.delete("/:id", requireRoles("HR", "ADMIN"), async (req, res, next) => {
     try {
