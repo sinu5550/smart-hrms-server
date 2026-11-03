@@ -286,6 +286,230 @@ function createDepartmentsRouter(prisma) {
     }
   });
 
+  // ==========================================
+  // ROSTER SHIFT CHANGE REQUESTS (EMPLOYEE & DEPT HEAD)
+  // ==========================================
+
+  // GET /api/departments/roster-shift-requests
+  // Returns roster shift change requests:
+  // - Employee gets their own requests
+  // - Department Head gets requests for their department
+  // - Admin/HR gets all organization requests
+  router.get("/roster-shift-requests", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+      const userRole = req.user.role;
+      const isManager = userRole === "OWNER" || userRole === "ADMIN" || userRole === "HR" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
+
+      const headedDepts = await prisma.department.findMany({
+        where: { organizationId, headUserId: callerUserId },
+        select: { id: true },
+      });
+      const headedDeptIds = headedDepts.map((d) => d.id);
+      const isDeptHead = headedDeptIds.length > 0;
+
+      let whereClause = { organizationId };
+
+      if (isManager) {
+        // Can filter by status if provided in query
+      } else if (isDeptHead) {
+        whereClause = {
+          organizationId,
+          OR: [
+            { userId: callerUserId },
+            { user: { departmentId: { in: headedDeptIds } } },
+          ],
+        };
+      } else {
+        whereClause = {
+          organizationId,
+          userId: callerUserId,
+        };
+      }
+
+      if (req.query.status) {
+        whereClause.status = req.query.status;
+      }
+
+      const requests = await prisma.rosterShiftRequest.findMany({
+        where: whereClause,
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              email: true,
+              avatarUrl: true,
+              departmentId: true,
+              department: { select: { id: true, name: true, headUserId: true } },
+              shift: { select: { id: true, shiftName: true, startTime: true, endTime: true } },
+            },
+          },
+          targetShift: {
+            select: { id: true, shiftName: true, startTime: true, endTime: true },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return res.status(200).json(requests);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/departments/roster-shift-requests
+  // Allows an employee (specifically Roster employees) to submit a shift change request for next day / upcoming date
+  router.post("/roster-shift-requests", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+      const { targetShiftId, effectiveDate, reason } = req.body || {};
+
+      if (!targetShiftId) {
+        return res.status(400).json({ message: "Please select the target shift you wish to switch to." });
+      }
+
+      // Check if user is a roster employee
+      const user = await prisma.user.findFirst({
+        where: { id: callerUserId, organizationId },
+        include: {
+          department: true,
+          organization: { select: { hasRosterDuty: true, rosterDepartmentIds: true } },
+        },
+      });
+
+      if (!user) {
+        return res.status(404).json({ message: "User not found." });
+      }
+
+      const orgHasRoster = Boolean(user.organization?.hasRosterDuty);
+      const rosterDeptIds = Array.isArray(user.organization?.rosterDepartmentIds) ? user.organization.rosterDepartmentIds : [];
+      const isRosterEmp = orgHasRoster && user.departmentId && rosterDeptIds.includes(user.departmentId);
+
+      if (!isRosterEmp) {
+        return res.status(403).json({ message: "Roster shift change applications are only available for designated roster employees." });
+      }
+
+      const shiftExists = await prisma.officeSetting.findFirst({
+        where: { id: targetShiftId, organizationId },
+      });
+      if (!shiftExists) {
+        return res.status(400).json({ message: "Selected shift not found." });
+      }
+
+      // Default to tomorrow's date if not specified
+      let effDate = new Date();
+      effDate.setDate(effDate.getDate() + 1);
+      if (effectiveDate) {
+        effDate = new Date(effectiveDate);
+      }
+      const effUtc = new Date(Date.UTC(effDate.getUTCFullYear(), effDate.getUTCMonth(), effDate.getUTCDate()));
+
+      const created = await prisma.rosterShiftRequest.create({
+        data: {
+          organizationId,
+          userId: callerUserId,
+          targetShiftId,
+          effectiveDate: effUtc,
+          reason: (reason || "").trim() || "Shift change requested by employee",
+          status: "PENDING",
+        },
+        include: {
+          targetShift: { select: { id: true, shiftName: true, startTime: true, endTime: true } },
+        },
+      });
+
+      return res.status(201).json(created);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // PATCH /api/departments/roster-shift-requests/:id/action
+  // Allows Department Head (or Admin/HR) to Accept or Reject
+  // If Accepted: Automatically updates user's shiftId to targetShiftId!
+  router.patch("/roster-shift-requests/:id/action", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { action, actionNote } = req.body || {}; // action: "APPROVED" | "REJECTED"
+      const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+      const userRole = req.user.role;
+      const isManager = userRole === "OWNER" || userRole === "ADMIN" || userRole === "HR" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
+
+      const request = await prisma.rosterShiftRequest.findFirst({
+        where: { id, organizationId },
+        include: {
+          user: { select: { id: true, departmentId: true, fullName: true, employeeId: true } },
+          targetShift: true,
+        },
+      });
+
+      if (!request) {
+        return res.status(404).json({ message: "Roster shift change request not found." });
+      }
+
+      // Check permission: Must be Department Head of that employee's department or Admin/HR
+      if (!isManager) {
+        if (!request.user?.departmentId) {
+          return res.status(403).json({ message: "Employee has no assigned department." });
+        }
+        const dept = await prisma.department.findFirst({
+          where: { id: request.user.departmentId, organizationId, headUserId: callerUserId },
+        });
+        if (!dept) {
+          return res.status(403).json({ message: "Only the designated Department Head can accept or reject this request." });
+        }
+      }
+
+      const newStatus = action === "APPROVED" || action === "ACCEPT" ? "APPROVED" : "REJECTED";
+
+      // If approved, automatically update the employee's shift in User table!
+      if (newStatus === "APPROVED") {
+        await prisma.user.update({
+          where: { id: request.userId },
+          data: {
+            shiftId: request.targetShiftId,
+          },
+        });
+      }
+
+      const updated = await prisma.rosterShiftRequest.update({
+        where: { id },
+        data: {
+          status: newStatus,
+          actionedById: callerUserId,
+          actionedAt: new Date(),
+          actionNote: actionNote || null,
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              shift: { select: { id: true, shiftName: true, startTime: true, endTime: true } },
+            },
+          },
+          targetShift: {
+            select: { id: true, shiftName: true, startTime: true, endTime: true },
+          },
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: newStatus === "APPROVED" ? "Roster shift request approved and employee shift updated successfully." : "Roster shift request rejected.",
+        request: updated,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 

@@ -153,6 +153,7 @@ model User {
   payrollSlips    PayrollSlip[]
   outworkRequests OutworkRequest[]
   hrLoans         HrLoan[]
+  rosterShiftRequests RosterShiftRequest[]
 
   @@unique([organizationId, employeeId])
   @@unique([organizationId, phone])
@@ -383,6 +384,7 @@ model OfficeSetting {
   updatedAt          DateTime      @updatedAt @map("updated_at")
   Organization       Organization? @relation(fields: [organizationId], references: [id])
   users              User[]
+  rosterShiftRequests RosterShiftRequest[]
 
   @@map("office_settings")
 }
@@ -436,6 +438,7 @@ model Organization {
   trainingPrograms      TrainingProgram[]
   kpiAppraisals         KpiAppraisal[]
   employeeRegistrations EmployeeRegistration[]
+  rosterShiftRequests   RosterShiftRequest[]
 
   @@index([emailDomain])
   @@index([status])
@@ -601,6 +604,29 @@ model OutworkRequest {
   @@index([organizationId, userId])
   @@index([organizationId, status])
   @@map("outwork_requests")
+}
+
+model RosterShiftRequest {
+  id              String        @id @default(uuid()) @db.Uuid
+  organizationId  String?       @map("organization_id") @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  targetShiftId   String        @map("target_shift_id") @db.Uuid
+  effectiveDate   DateTime      @map("effective_date") @db.Date // usually next day
+  reason          String?       @db.Text
+  status          String        @default("PENDING") // PENDING, APPROVED, REJECTED
+  actionedById    String?       @map("actioned_by_id") @db.Uuid
+  actionedAt      DateTime?     @map("actioned_at")
+  actionNote      String?       @map("action_note") @db.Text
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetShift     OfficeSetting @relation(fields: [targetShiftId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, userId])
+  @@index([organizationId, status])
+  @@map("roster_shift_requests")
 }
 
 model HrLoan {
