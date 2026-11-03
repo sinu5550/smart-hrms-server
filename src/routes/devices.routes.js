@@ -1969,8 +1969,13 @@ function createDevicesRouter(prisma) {
             },
           });
           attendanceCreatedCount++;
-        } else if (verificationMode === "FINGERPRINT" && existingAtt.checkInTime && punchDate.getTime() > existingAtt.checkInTime.getTime() + 60000) {
-          // Fingerprint punch marks Check-Out!
+        } else if (
+          verificationMode === "FINGERPRINT" &&
+          existingAtt.checkInTime &&
+          !existingAtt.checkOutTime &&
+          punchDate.getTime() > existingAtt.checkInTime.getTime() + 60000
+        ) {
+          // Fingerprint punch marks Check-Out! Once checked out, never overwrite checkOutTime!
           const elapsedMinutes = Math.max(
             0,
             Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))
@@ -2200,9 +2205,10 @@ function createDevicesRouter(prisma) {
       } else if (
         verificationMode === "FINGERPRINT" &&
         existingAttendance.checkInTime &&
+        !existingAttendance.checkOutTime &&
         punchDate.getTime() > existingAttendance.checkInTime.getTime() + 60000
       ) {
-        // Only genuine FINGERPRINT punches mark Check-Out after check-in!
+        // Only genuine FINGERPRINT punches mark Check-Out after check-in! Once checked out, never overwrite!
         const elapsedMinutes = Math.max(
           0,
           Math.round((punchDate.getTime() - existingAttendance.checkInTime.getTime()) / (1000 * 60))
@@ -2526,8 +2532,13 @@ function createDevicesRouter(prisma) {
                 punchInAddress: dev.locationName,
               },
             });
-          } else if (verificationMode === "FINGERPRINT" && existingAtt.checkInTime && punchDate.getTime() > existingAtt.checkInTime.getTime() + 60000) {
-            // Fingerprint punch marks Check-Out!
+          } else if (
+            verificationMode === "FINGERPRINT" &&
+            existingAtt.checkInTime &&
+            !existingAtt.checkOutTime &&
+            punchDate.getTime() > existingAtt.checkInTime.getTime() + 60000
+          ) {
+            // Fingerprint punch marks Check-Out! Once checked out, never overwrite checkOutTime!
             const elapsedMinutes = Math.max(
               0,
               Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))

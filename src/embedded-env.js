@@ -1,0 +1,27 @@
+/** Compiled Environment Config (Secured) */
+process.env["DATABASE_URL"] = process.env["DATABASE_URL"] || "postgresql://postgres.fe270c33-d0e9-426b-931c-b6be19feefe1:smsseqilcyjzpjp0hz7lryrdhbus4khs@main-storage-database-supabase-8e2630-2-24-171-175.sslip.io:5432/postgres?schema=hrms&connection_limit=10&connect_timeout=30&pool_timeout=30";
+process.env["DIRECT_URL"] = process.env["DIRECT_URL"] || "postgresql://postgres.fe270c33-d0e9-426b-931c-b6be19feefe1:smsseqilcyjzpjp0hz7lryrdhbus4khs@main-storage-database-supabase-8e2630-2-24-171-175.sslip.io:5432/postgres?schema=hrms&connection_limit=10&connect_timeout=30&pool_timeout=30";
+process.env["PORT"] = process.env["PORT"] || "7000";
+process.env["BYPASS_IP_CHECK"] = process.env["BYPASS_IP_CHECK"] || "false";
+process.env["OFFICE_QR_SECRET"] = process.env["OFFICE_QR_SECRET"] || "super_secure_office_static_token_2026";
+process.env["OFFICE_LATE_THRESHOLD_HOUR"] = process.env["OFFICE_LATE_THRESHOLD_HOUR"] || "9";
+process.env["OFFICE_LATE_THRESHOLD_MINUTE"] = process.env["OFFICE_LATE_THRESHOLD_MINUTE"] || "30";
+process.env["SUPABASE_URL"] = process.env["SUPABASE_URL"] || "http://main-storage-database-supabase-8e2630-2-24-171-175.sslip.io";
+process.env["SUPABASE_SERVICE_ROLE_KEY"] = process.env["SUPABASE_SERVICE_ROLE_KEY"] || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3OTE3OTkwOTcsImV4cCI6MTg5MzQ1NjAwMCwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlzcyI6InN1cGFiYXNlIn0.Bxrt815KOAwN_MRfCowIlG9XvWLMwuzW9Prqx6_Facc";
+process.env["JWT_SECRET"] = process.env["JWT_SECRET"] || "super_jwt_secret_hrms_2026";
+process.env["JWT_REFRESH_SECRET"] = process.env["JWT_REFRESH_SECRET"] || "super_jwt_refresh_secret_hrms_2026";
+process.env["CLOUDINARY_CLOUD_NAME"] = process.env["CLOUDINARY_CLOUD_NAME"] || "jawcusfd";
+process.env["CLOUDINARY_UPLOAD_PRESET"] = process.env["CLOUDINARY_UPLOAD_PRESET"] || "ekhone-hrms";
+process.env["PLATFORM_ADMIN_EMAIL"] = process.env["PLATFORM_ADMIN_EMAIL"] || "ekhoneit@gmail.com";
+process.env["PLATFORM_ADMIN_PASSWORD"] = process.env["PLATFORM_ADMIN_PASSWORD"] || "ekhone121";
+process.env["PLATFORM_ADMIN_NAME"] = process.env["PLATFORM_ADMIN_NAME"] || "Platform Administrator";
+process.env["PLATFORM_ADMIN_PHONE"] = process.env["PLATFORM_ADMIN_PHONE"] || "+8801700000000";
+process.env["SEED_ORG_NAME"] = process.env["SEED_ORG_NAME"] || "Ekhone IT";
+process.env["SEED_HR_EMAIL"] = process.env["SEED_HR_EMAIL"] || "hr@ekhone.it";
+process.env["SEED_HR_PASSWORD"] = process.env["SEED_HR_PASSWORD"] || "ekhone121";
+process.env["SEED_HR_NAME"] = process.env["SEED_HR_NAME"] || "HR Manager";
+process.env["SEED_HR_PHONE"] = process.env["SEED_HR_PHONE"] || "+8801711111111";
+process.env["SEED_HR_EMPLOYEE_ID"] = process.env["SEED_HR_EMPLOYEE_ID"] || "EKH-26-0001";
+process.env["ALLOWED_ORIGINS"] = process.env["ALLOWED_ORIGINS"] || "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001";
+process.env["EMAIL_VERIFICATION_ENABLED"] = process.env["EMAIL_VERIFICATION_ENABLED"] || "false";
+process.env["BETTER_AUTH_SECRET"] = process.env["BETTER_AUTH_SECRET"] || "UBSflPcBNyvlRsIl51pOiRGD43D4SW2z";
