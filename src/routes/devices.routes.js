@@ -12,6 +12,26 @@ const { sendDeviceCommandViaTunnel, isDeviceTunnelOnline } = require("../device-
 function createDevicesRouter(prisma) {
   const router = express.Router();
 
+  // Helper to resolve Attendance Date considering Organization's Day Cutoff Hour (default 6:00 AM)
+  async function resolveAttendanceLedgerDate(organizationId, punchDate = new Date()) {
+    try {
+      const org = await prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { dayCutoffHour: true },
+      });
+      const cutoff = org?.dayCutoffHour ?? 6;
+      const shifted = new Date(punchDate.getTime() - cutoff * 3600 * 1000);
+      const localYMD = shifted.toLocaleDateString("en-CA", { timeZone: "Asia/Dhaka" });
+      const [y, m, d] = localYMD.split("-").map(Number);
+      return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+    } catch {
+      const shifted = new Date(punchDate.getTime() - 6 * 3600 * 1000);
+      const localYMD = shifted.toLocaleDateString("en-CA", { timeZone: "Asia/Dhaka" });
+      const [y, m, d] = localYMD.split("-").map(Number);
+      return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+    }
+  }
+
   // Helper to compute a secure HMAC QR payload for an organization
   function computeTenantQrPayload(organizationId, organizationSlug, allowedPublicIp) {
     const secret = process.env.JWT_SECRET || "hrms_secret";
@@ -1920,10 +1940,8 @@ function createDevicesRouter(prisma) {
         }
 
         // Attendance ledger processing:
-        // Normalize punchDate to UTC midnight of local day
-        const localYMD = punchDate.toLocaleDateString("en-CA"); // YYYY-MM-DD format
-        const [y, m, d] = localYMD.split("-").map(Number);
-        const dayUtcMidnight = new Date(Date.UTC(y, m - 1, d));
+        // Use organization's dayCutoffHour (e.g. 6:00 AM) so midnight/overnight punches belong to correct day
+        const dayUtcMidnight = await resolveAttendanceLedgerDate(organizationId, punchDate);
 
         const existingAtt = await prisma.attendance.findUnique({
           where: {
@@ -2128,9 +2146,7 @@ function createDevicesRouter(prisma) {
       }
 
       const punchDate = punchTime;
-      const utcMidnightToday = new Date(
-        Date.UTC(punchDate.getUTCFullYear(), punchDate.getUTCMonth(), punchDate.getUTCDate())
-      );
+      const utcMidnightToday = await resolveAttendanceLedgerDate(device.organizationId, punchDate);
 
       // 4. Record raw punch
       await prisma.biometricRawLog.create({
@@ -2484,9 +2500,7 @@ function createDevicesRouter(prisma) {
             newRawCount++;
           }
 
-          const localYMD = punchDate.toLocaleDateString("en-CA");
-          const [y, m, d] = localYMD.split("-").map(Number);
-          const dayUtcMidnight = new Date(Date.UTC(y, m - 1, d));
+          const dayUtcMidnight = await resolveAttendanceLedgerDate(dev.organizationId, punchDate);
 
           const existingAtt = await prisma.attendance.findUnique({
             where: {

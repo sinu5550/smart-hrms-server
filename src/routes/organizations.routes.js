@@ -214,6 +214,7 @@ function createOrganizationsRouter(prisma) {
           weekendDays: true,
           hasRosterDuty: true,
           rosterDepartmentIds: true,
+          dayCutoffHour: true,
           status: true,
           createdAt: true,
           subscriptions: {
@@ -248,6 +249,7 @@ function createOrganizationsRouter(prisma) {
           ...(dto.weekendDays !== undefined ? { weekendDays: dto.weekendDays } : {}),
           ...(dto.hasRosterDuty !== undefined ? { hasRosterDuty: Boolean(dto.hasRosterDuty) } : {}),
           ...(dto.rosterDepartmentIds !== undefined ? { rosterDepartmentIds: dto.rosterDepartmentIds } : {}),
+          ...(dto.dayCutoffHour !== undefined ? { dayCutoffHour: Math.max(0, Math.min(23, Number(dto.dayCutoffHour))) } : {}),
         },
         select: {
           id: true,
@@ -259,6 +261,7 @@ function createOrganizationsRouter(prisma) {
           weekendDays: true,
           hasRosterDuty: true,
           rosterDepartmentIds: true,
+          dayCutoffHour: true,
         },
       });
 

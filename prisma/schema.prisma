@@ -409,6 +409,7 @@ model Organization {
   weekendDays           Json?                      @default("[\"Friday\"]") @map("weekend_days")
   hasRosterDuty         Boolean?                   @default(false) @map("has_roster_duty")
   rosterDepartmentIds   Json?                      @default("[]") @map("roster_department_ids")
+  dayCutoffHour         Int?                       @default(6) @map("day_cutoff_hour") // New Attendance Day starts at e.g. 06:00 AM (0-23)
   createdAt             DateTime                   @default(now()) @map("created_at")
   updatedAt             DateTime                   @updatedAt @map("updated_at")
   users                 User[]

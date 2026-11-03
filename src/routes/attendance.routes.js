@@ -5,9 +5,32 @@ const { authenticateToken, requireRoles, officeIpGuard, resolveClientIp } = requ
 function createAttendanceRouter(prisma) {
   const router = express.Router();
 
+  // Calculate Attendance Date based on Organization's Day Cutoff Hour (e.g. 06:00 AM)
+  // If an employee punches at 12:25 AM, 2:00 AM or 5:30 AM (before 6:00 AM),
+  // it is counted towards the previous day's shift, not a brand new day!
+  async function getOrganizationAttendanceDate(organizationId, dateInput = new Date()) {
+    const org = await prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { dayCutoffHour: true },
+    });
+    const cutoffHour = org?.dayCutoffHour ?? 6; // Default to 6:00 AM if not set
+
+    // Convert dateInput to Asia/Dhaka local time
+    const inputDate = new Date(dateInput);
+    // Subtract cutoffHour hours so that e.g. 05:59 AM belongs to previous calendar day
+    const shifted = new Date(inputDate.getTime() - cutoffHour * 3600 * 1000);
+    const localYMD = shifted.toLocaleDateString("en-CA", { timeZone: "Asia/Dhaka" }); // "YYYY-MM-DD"
+    const [y, m, d] = localYMD.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+  }
+
   function getUtcMidnightToday() {
     const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    // Default 6 hours offset for BD time zone (06:00 AM cutoff)
+    const shifted = new Date(now.getTime() - 6 * 3600 * 1000);
+    const localYMD = shifted.toLocaleDateString("en-CA", { timeZone: "Asia/Dhaka" });
+    const [y, m, d] = localYMD.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
   }
 
   async function calculateShiftStatus(organizationId, userId, checkInDate) {
@@ -116,7 +139,7 @@ function createAttendanceRouter(prisma) {
   // GET /api/attendance/today-status
   router.get("/today-status", async (req, res, next) => {
     try {
-      const today = getUtcMidnightToday();
+      const today = await getOrganizationAttendanceDate(req.user.organizationId);
       const attendance = await prisma.attendance.findUnique({
         where: { userId_date: { userId: req.user.userId, date: today } },
         include: {
@@ -245,7 +268,7 @@ function createAttendanceRouter(prisma) {
           });
         }
 
-        const today = getUtcMidnightToday();
+        const today = await getOrganizationAttendanceDate(req.user.organizationId);
         const now = new Date();
 
         const existingRecord = await prisma.attendance.findUnique({
@@ -293,7 +316,7 @@ function createAttendanceRouter(prisma) {
     async (req, res, next) => {
       try {
         const dto = req.body || {};
-        const today = getUtcMidnightToday();
+        const today = await getOrganizationAttendanceDate(req.user.organizationId);
         const ipAddress = resolveClientIp(req);
 
         const result = await prisma.$transaction(async (tx) => {
@@ -348,7 +371,7 @@ function createAttendanceRouter(prisma) {
     (req, res, next) => officeIpGuard(prisma, req, res, next),
     async (req, res, next) => {
       try {
-        const today = getUtcMidnightToday();
+        const today = await getOrganizationAttendanceDate(req.user.organizationId);
 
         const result = await prisma.$transaction(async (tx) => {
           const attendance = await tx.attendance.findUnique({
@@ -443,7 +466,7 @@ function createAttendanceRouter(prisma) {
           });
         }
 
-        const today = getUtcMidnightToday();
+        const today = await getOrganizationAttendanceDate(req.user.organizationId);
 
         const result = await prisma.$transaction(async (tx) => {
           const attendance = await tx.attendance.findUnique({
@@ -505,7 +528,7 @@ function createAttendanceRouter(prisma) {
   // GET /api/attendance/admin/today
   router.get("/admin/today", requireRoles("HR", "ADMIN"), async (req, res, next) => {
     try {
-      const today = getUtcMidnightToday();
+      const today = await getOrganizationAttendanceDate(req.user.organizationId);
       const org = await prisma.organization.findUnique({
         where: { id: req.user.organizationId },
         select: { ownerEmail: true },
