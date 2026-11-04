@@ -292,6 +292,145 @@ function createEmployeesRouter(prisma) {
   router.use(authenticateToken);
   router.use(requireRoles("HR", "ADMIN"));
 
+  // GET /api/employees/dashboard-stats
+  router.get("/dashboard-stats", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const org = await prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { ownerEmail: true },
+      });
+      const ownerEmail = org?.ownerEmail?.toLowerCase();
+
+      // 1. All active employees (excluding owner)
+      const whereEmployees = {
+        organizationId,
+        isDeleted: false,
+        status: "ACTIVE",
+        ...(ownerEmail ? { email: { not: ownerEmail } } : {}),
+      };
+
+      const employees = await prisma.user.findMany({
+        where: whereEmployees,
+        select: {
+          id: true,
+          employeeId: true,
+          fullName: true,
+          avatarUrl: true,
+          dateOfBirth: true,
+          department: { select: { id: true, name: true } },
+          designation: { select: { id: true, name: true } },
+        },
+      });
+
+      // 2. Out of work today (approved outwork requests for today)
+      const now = new Date();
+      const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+      const todayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+
+      const outworkToday = await prisma.outworkRequest.findMany({
+        where: {
+          organizationId,
+          status: "APPROVED",
+          visitDate: {
+            gte: todayStart,
+            lte: todayEnd,
+          },
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              avatarUrl: true,
+              department: { select: { name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      // 3. On Leave today (approved leaves covering today)
+      const leavesToday = await prisma.leaveRequest.findMany({
+        where: {
+          organizationId,
+          status: "APPROVED",
+          startDate: { lte: todayEnd },
+          endDate: { gte: todayStart },
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              avatarUrl: true,
+              department: { select: { name: true } },
+            },
+          },
+          leaveType: { select: { name: true } },
+        },
+      });
+
+      // 4. Running Month Birthdays
+      const currentMonth = now.getMonth();
+      const currentMonthName = now.toLocaleString("default", { month: "long" });
+
+      const birthdays = employees
+        .filter((emp) => {
+          if (!emp.dateOfBirth) return false;
+          const dob = new Date(emp.dateOfBirth);
+          return dob.getMonth() === currentMonth;
+        })
+        .map((emp) => {
+          const dob = new Date(emp.dateOfBirth);
+          const day = dob.getDate();
+          const monthShort = dob.toLocaleString("default", { month: "short" });
+          const formattedDay = String(day).padStart(2, "0");
+          return {
+            id: emp.id,
+            fullName: emp.fullName,
+            employeeId: emp.employeeId,
+            avatarUrl: emp.avatarUrl,
+            department: emp.department?.name || "General",
+            day,
+            displayDate: `${monthShort} ${formattedDay}`,
+          };
+        })
+        .sort((a, b) => a.day - b.day);
+
+      return res.status(200).json({
+        totalActive: employees.length,
+        outworkToday: outworkToday.map((item) => ({
+          id: item.id,
+          userId: item.userId,
+          fullName: item.user?.fullName || "Employee",
+          employeeId: item.user?.employeeId || "N/A",
+          avatarUrl: item.user?.avatarUrl || null,
+          department: item.user?.department?.name || "General",
+          destination: item.destination,
+          purpose: item.purpose,
+        })),
+        onLeaveToday: leavesToday.map((item) => ({
+          id: item.id,
+          userId: item.userId,
+          fullName: item.user?.fullName || "Employee",
+          employeeId: item.user?.employeeId || "N/A",
+          avatarUrl: item.user?.avatarUrl || null,
+          department: item.user?.department?.name || "General",
+          leaveType: item.leaveType?.name || "Leave",
+          startDate: item.startDate,
+          endDate: item.endDate,
+        })),
+        birthdays,
+        currentMonthName,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // GET /api/employees/next-id
   router.get("/next-id", async (req, res, next) => {
     try {
