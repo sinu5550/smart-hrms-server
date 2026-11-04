@@ -302,11 +302,28 @@ function createEmployeesRouter(prisma) {
       });
       const ownerEmail = org?.ownerEmail?.toLowerCase();
 
-      // 1. All active employees (excluding owner)
+      // 1. Determine which employment statuses should be counted in attendance
+      let attendanceCountStatusCodes = ["ACTIVE", "ON_PROBATION"];
+      try {
+        const statusConfigs = await prisma.$queryRawUnsafe(
+          "SELECT code, count_in_attendance as \"countInAttendance\" FROM hrms.employment_status_configs WHERE organization_id = $1::uuid",
+          organizationId
+        );
+        if (Array.isArray(statusConfigs) && statusConfigs.length > 0) {
+          const eligible = statusConfigs.filter((s) => s.countInAttendance).map((s) => s.code);
+          if (eligible.length > 0) {
+            attendanceCountStatusCodes = eligible;
+          }
+        }
+      } catch (e) {
+        // Fallback to active and on probation
+      }
+
+      // Query employees matching those statuses (excluding owner)
       const whereEmployees = {
         organizationId,
         isDeleted: false,
-        status: "ACTIVE",
+        status: { in: attendanceCountStatusCodes },
         ...(ownerEmail ? { email: { not: ownerEmail } } : {}),
       };
 

@@ -235,6 +235,137 @@ function createCoreHrRouter(prisma) {
     }
   });
 
+  // 6. Employment Status Configurations (Custom statuses & Attendance calculation selector)
+  router.get("/employment-statuses", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const statuses = await prisma.$queryRawUnsafe(
+        "SELECT id, name, code, color, count_in_attendance as \"countInAttendance\", is_default as \"isDefault\", created_at as \"createdAt\" FROM hrms.employment_status_configs WHERE organization_id = $1::uuid ORDER BY created_at ASC",
+        organizationId
+      );
+      return res.status(200).json(statuses);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/employment-statuses", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { name, color, countInAttendance } = req.body || {};
+      if (!name || !name.trim()) {
+        return res.status(400).json({ message: "Status name is required." });
+      }
+
+      const cleanName = name.trim();
+      const code = cleanName.toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "");
+
+      const existing = await prisma.$queryRawUnsafe(
+        "SELECT id FROM hrms.employment_status_configs WHERE organization_id = $1::uuid AND code = $2",
+        organizationId,
+        code
+      );
+      if (existing.length > 0) {
+        return res.status(400).json({ message: `Status "${cleanName}" already exists.` });
+      }
+
+      const rows = await prisma.$queryRawUnsafe(
+        `INSERT INTO hrms.employment_status_configs (organization_id, name, code, color, count_in_attendance, is_default)
+         VALUES ($1::uuid, $2, $3, $4, $5, false)
+         RETURNING id, name, code, color, count_in_attendance as "countInAttendance", is_default as "isDefault", created_at as "createdAt"`,
+        organizationId,
+        cleanName,
+        code,
+        color || "emerald",
+        countInAttendance !== undefined ? Boolean(countInAttendance) : true
+      );
+
+      return res.status(201).json(rows[0]);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch("/employment-statuses/:id", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { name, color, countInAttendance } = req.body || {};
+
+      const existing = await prisma.$queryRawUnsafe(
+        "SELECT id, is_default FROM hrms.employment_status_configs WHERE id = $1::uuid AND organization_id = $2::uuid",
+        req.params.id,
+        organizationId
+      );
+      if (existing.length === 0) {
+        return res.status(404).json({ message: "Status not found." });
+      }
+
+      const updates = [];
+      const values = [req.params.id, organizationId];
+      let pIdx = 3;
+
+      if (name && name.trim()) {
+        updates.push(`name = $${pIdx++}`);
+        values.push(name.trim());
+      }
+      if (color) {
+        updates.push(`color = $${pIdx++}`);
+        values.push(color);
+      }
+      if (countInAttendance !== undefined) {
+        updates.push(`count_in_attendance = $${pIdx++}`);
+        values.push(Boolean(countInAttendance));
+      }
+
+      if (updates.length === 0) {
+        return res.status(200).json(existing[0]);
+      }
+
+      const query = `UPDATE hrms.employment_status_configs SET ${updates.join(", ")}, updated_at = NOW() WHERE id = $1::uuid AND organization_id = $2::uuid RETURNING id, name, code, color, count_in_attendance as "countInAttendance", is_default as "isDefault"`;
+      const rows = await prisma.$queryRawUnsafe(query, ...values);
+      return res.status(200).json(rows[0]);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/employment-statuses/:id", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const existing = await prisma.$queryRawUnsafe(
+        "SELECT id, code, is_default FROM hrms.employment_status_configs WHERE id = $1::uuid AND organization_id = $2::uuid",
+        req.params.id,
+        organizationId
+      );
+      if (existing.length === 0) {
+        return res.status(404).json({ message: "Status not found." });
+      }
+      if (existing[0].is_default || existing[0].code === "ACTIVE") {
+        return res.status(400).json({ message: "Default system status cannot be deleted." });
+      }
+
+      // Check if any employees currently have this status
+      const assignedUsers = await prisma.user.count({
+        where: { organizationId, status: existing[0].code },
+      });
+      if (assignedUsers > 0) {
+        return res.status(400).json({
+          message: `Cannot delete status "${existing[0].code}". There are currently ${assignedUsers} employee(s) assigned with this status. Please reassign them first.`,
+        });
+      }
+
+      await prisma.$executeRawUnsafe(
+        "DELETE FROM hrms.employment_status_configs WHERE id = $1::uuid AND organization_id = $2::uuid",
+        req.params.id,
+        organizationId
+      );
+
+      return res.status(200).json({ message: "Status removed successfully." });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 

@@ -102,7 +102,7 @@ model User {
   passwordHash     String           @map("password_hash")
   refreshTokenHash String?          @map("refresh_token_hash")
   role             Role             @default(EMPLOYEE)
-  status           EmploymentStatus @default(ACTIVE)
+  status           String           @default("ACTIVE")
 
   fullName                 String  @map("full_name")
   phone                    String?
