@@ -490,7 +490,8 @@ function createAttendanceRouter(prisma) {
             0,
             Math.round((now.getTime() - attendance.checkInTime.getTime()) / (1000 * 60))
           );
-          const totalWorkMinutes = Math.max(0, elapsedTotalMinutes - attendance.totalBreakMinutes);
+          // Total work hours includes break time (break time is paid / not deducted)
+          const totalWorkMinutes = elapsedTotalMinutes;
           const overtimeMinutes = await calculateOvertimeMinutes(
             req.user.organizationId,
             req.user.userId,

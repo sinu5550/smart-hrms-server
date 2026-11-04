@@ -1980,7 +1980,8 @@ function createDevicesRouter(prisma) {
             0,
             Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))
           );
-          const totalWorkMinutes = Math.max(0, elapsedMinutes - (existingAtt.totalBreakMinutes || 0));
+          // Total work hours includes break time (break time is paid / not deducted)
+          const totalWorkMinutes = elapsedMinutes;
           const overtimeMinutes = await determineOvertimeMinutes(organizationId, userRec.id, punchDate, totalWorkMinutes);
 
           await prisma.attendance.update({
@@ -2213,10 +2214,8 @@ function createDevicesRouter(prisma) {
           0,
           Math.round((punchDate.getTime() - existingAttendance.checkInTime.getTime()) / (1000 * 60))
         );
-        const totalWorkMinutes = Math.max(
-          0,
-          elapsedMinutes - (existingAttendance.totalBreakMinutes || 0)
-        );
+        // Total work hours includes break time (break time is paid / not deducted)
+        const totalWorkMinutes = elapsedMinutes;
         const overtimeMinutes = await determineOvertimeMinutes(device.organizationId, user.id, punchDate, totalWorkMinutes);
 
         await prisma.attendance.update({
@@ -2543,7 +2542,8 @@ function createDevicesRouter(prisma) {
               0,
               Math.round((punchDate.getTime() - existingAtt.checkInTime.getTime()) / (1000 * 60))
             );
-            const totalWorkMinutes = Math.max(0, elapsedMinutes - (existingAtt.totalBreakMinutes || 0));
+            // Total work hours includes break time (break time is paid / not deducted)
+            const totalWorkMinutes = elapsedMinutes;
             const overtimeMinutes = await determineOvertimeMinutes(dev.organizationId, userRec.id, punchDate, totalWorkMinutes);
 
             await prisma.attendance.update({
