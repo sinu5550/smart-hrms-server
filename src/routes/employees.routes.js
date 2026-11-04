@@ -390,11 +390,29 @@ function createEmployeesRouter(prisma) {
         },
       });
 
-      // 4. Running Month Birthdays
+      // 4. Running Month Birthdays (all non-deleted employees of organization)
+      const allActiveOrgEmployees = await prisma.user.findMany({
+        where: {
+          organizationId,
+          isDeleted: false,
+          dateOfBirth: { not: null },
+          status: { notIn: ["RESIGNED", "TERMINATED"] },
+        },
+        select: {
+          id: true,
+          employeeId: true,
+          fullName: true,
+          avatarUrl: true,
+          dateOfBirth: true,
+          department: { select: { id: true, name: true } },
+          designation: { select: { id: true, name: true } },
+        },
+      });
+
       const currentMonth = now.getMonth();
       const currentMonthName = now.toLocaleString("default", { month: "long" });
 
-      const birthdays = employees
+      const birthdays = allActiveOrgEmployees
         .filter((emp) => {
           if (!emp.dateOfBirth) return false;
           const dob = new Date(emp.dateOfBirth);
