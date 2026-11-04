@@ -4,6 +4,41 @@ const { authenticateToken, requireRoles } = require("../middleware");
 function createSettingsRouter(prisma) {
   const router = express.Router();
 
+  // ==========================================
+  // DESKTOP SUITE AUTO-UPDATE RELEASE CHECK (Public / No token required)
+  // ==========================================
+  // GET /api/settings/check-update?currentVersionCode=1
+  router.get("/check-update", async (req, res, next) => {
+    try {
+      const currentCode = Number(req.query.currentVersionCode || 1);
+      const latestRelease = await prisma.systemUpdateRelease.findFirst({
+        orderBy: { versionCode: "desc" },
+      });
+
+      if (!latestRelease || latestRelease.versionCode <= currentCode) {
+        return res.status(200).json({
+          hasUpdate: false,
+          currentVersionCode: currentCode,
+          latestVersionCode: latestRelease?.versionCode || currentCode,
+        });
+      }
+
+      return res.status(200).json({
+        hasUpdate: true,
+        currentVersionCode: currentCode,
+        latestVersionCode: latestRelease.versionCode,
+        versionName: latestRelease.versionName,
+        patchZipUrl: latestRelease.patchZipUrl,
+        fileSizeMb: latestRelease.fileSizeMb,
+        releaseNotes: latestRelease.releaseNotes,
+        isMandatory: latestRelease.isMandatory,
+        releasedAt: latestRelease.releasedAt,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.use(authenticateToken);
 
   // GET /api/shifts
