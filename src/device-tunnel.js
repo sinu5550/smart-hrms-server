@@ -101,33 +101,42 @@ async function probeSingleHost(host, port) {
           try {
             const data = JSON.parse(Buffer.concat(chunks).toString());
             resolve({ ok: true, data });
-          } catch {
-            resolve({ ok: false });
+          } catch (e) {
+            resolve({ ok: false, err: "Invalid JSON" });
           }
         });
       }
     );
-    req.on("error", () => resolve({ ok: false }));
+    req.on("error", (err) => resolve({ ok: false, err: err.message }));
     req.on("timeout", () => {
       req.destroy();
-      resolve({ ok: false });
+      resolve({ ok: false, err: "Timeout" });
     });
   });
 }
 
+let g_lastProbeLog = 0;
 async function checkIsupGatewayStatus() {
   const port = process.env.ISUP_GATEWAY_PORT || 7661;
+  const now = Date.now();
+  const shouldLog = (now - g_lastProbeLog) > 30000; // Log probe attempts every 30 seconds
+
   for (const host of ISUP_CANDIDATE_HOSTS) {
     const res = await probeSingleHost(host, port);
     if (res.ok && res.data) {
-      if (!g_isupGatewayOnline) {
-        console.log(`[ISUP Gateway Bridge] Connected to gateway at ${host}:${port}. Device online: ${res.data.online}`);
+      if (!g_isupGatewayOnline || shouldLog) {
+        console.log(`[ISUP Gateway Bridge] ✓ Connected to gateway at ${host}:${port}. Device online: ${res.data.online}`);
+        g_lastProbeLog = now;
       }
       g_workingIsupHost = host;
       g_isupGatewayOnline = !!res.data.online;
       return g_isupGatewayOnline;
+    } else if (shouldLog) {
+      console.log(`[ISUP Gateway Probe] ${host}:${port} -> ${res.err || "failed"}`);
     }
   }
+
+  if (shouldLog) g_lastProbeLog = now;
   g_isupGatewayOnline = false;
   return false;
 }
@@ -212,7 +221,7 @@ async function sendDeviceCommandViaTunnel(serialNumber, { method, path, body, ti
     const isupRes = await sendViaIsupGateway(method, path, body, timeout);
     return isupRes;
   } catch (isupErr) {
-    // If ISUP gateway not ready, try WebSocket agent tunnel
+    console.warn(`[ISUP Gateway Send Error]:`, isupErr.message);
   }
 
   return new Promise((resolve, reject) => {
