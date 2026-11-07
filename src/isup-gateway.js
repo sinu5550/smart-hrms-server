@@ -20,9 +20,10 @@ function setupIsupServer(prisma, isupPort = 7660) {
         buffer = Buffer.concat([buffer, chunk]);
         const text = buffer.toString("utf8");
 
-        // Hikvision ISUP handshake / XML or JSON payload detection
-        // Case 1: Device Registration Request (XML or HTTP-like / ISUP Packet)
-        if (text.includes("Register") || text.includes("<devId>") || text.includes("deviceNo")) {
+        console.log(`[ISUP Gateway RAW PACKET ${chunk.length} bytes]:`, text.substring(0, 300));
+
+        // Always immediately acknowledge any connection packet to satisfy ISUP handshake
+        if (text.includes("Register") || text.includes("<devId>") || text.includes("deviceNo") || text.includes("ISUP") || chunk.length > 0) {
           console.log(`[ISUP Gateway] Received registration packet from ${remote}`);
 
           // Extract device ID / Serial if present
@@ -208,3 +209,4 @@ function setupIsupServer(prisma, isupPort = 7660) {
 }
 
 module.exports = { setupIsupServer };
+
