@@ -13,10 +13,10 @@ RUN apt-get update && apt-get install -y \
 
 COPY include /app/include
 COPY lib /app/lib
-COPY main.c /app/main.c
+COPY main.cpp /app/main.cpp
 
-# Compile with Hikvision native libraries
-RUN gcc -O2 -I/app/include /app/main.c -L/app/lib -lHCISUPCMS -lHCISUPAlarm -lcurl -lpthread -Wl,-rpath=/app/lib -o /app/isup_gateway
+# Compile with g++ using Hikvision official native Linux64 libraries
+RUN g++ -O2 -I/app/include /app/main.cpp -L/app/lib -lHCISUPCMS -lHCISUPAlarm -lcurl -lpthread -Wl,-rpath=/app/lib -o /app/isup_gateway
 
 ENV LD_LIBRARY_PATH="/app/lib:$LD_LIBRARY_PATH"
 

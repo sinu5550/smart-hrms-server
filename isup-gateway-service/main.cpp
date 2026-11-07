@@ -1,14 +1,14 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
-#include <signal.h>
+#include <csignal>
 #include <curl/curl.h>
 
 #include "HCISUPCMS.h"
 #include "HCISUPAlarm.h"
 
-static int g_running = 1;
+static volatile sig_atomic_t g_running = 1;
 
 void sig_handler(int sig) {
     g_running = 0;
@@ -102,7 +102,6 @@ int main(int argc, char *argv[]) {
 
     NET_EHOME_CMS_LISTEN_PARAM struListen;
     memset(&struListen, 0, sizeof(struListen));
-    struListen.dwSize = sizeof(struListen);
     strcpy(struListen.struAddress.szIP, "0.0.0.0");
     struListen.struAddress.wPort = 7660;
     struListen.fnCB = DeviceRegisterCB;
