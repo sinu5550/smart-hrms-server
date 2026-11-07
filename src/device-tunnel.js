@@ -14,9 +14,10 @@ const activeTunnels = new Map();
 const pendingRequests = new Map();
 
 // Dynamic working ISUP host resolution
-let g_workingIsupHost = process.env.ISUP_GATEWAY_HOST || "hikvision-gateway";
+let g_workingIsupHost = process.env.ISUP_GATEWAY_HOST || "hikvision-gateway-uoyomo";
 const ISUP_CANDIDATE_HOSTS = [
   process.env.ISUP_GATEWAY_HOST,
+  "hikvision-gateway-uoyomo",
   "hikvision-gateway",
   "172.17.0.1",
   "host.docker.internal",
