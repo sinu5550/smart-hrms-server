@@ -234,13 +234,6 @@ std::string execute_isapi(LONG userId, const std::string& method, const std::str
     ptParam.pRequestUrl = (void*)cleanUrl.c_str();
     ptParam.dwRequestUrlLen = cleanUrl.length();
 
-    if (!body.empty()) {
-        ptParam.pInBuffer = (void*)body.c_str();
-        ptParam.dwInSize = body.length();
-        ptParam.pCondBuffer = (void*)body.c_str();
-        ptParam.dwCondSize = body.length();
-    }
-
     const DWORD OUT_BUF_SIZE = 1024 * 1024; // 1MB buffer
     char *outBuffer = (char*)malloc(OUT_BUF_SIZE);
     if (!outBuffer) return "{\"error\":\"Out of memory\"}";
@@ -256,16 +249,45 @@ std::string execute_isapi(LONG userId, const std::string& method, const std::str
 
     BOOL ret = FALSE;
     if (method == "PUT") {
+        if (!body.empty()) {
+            ptParam.pInBuffer = (void*)body.c_str();
+            ptParam.dwInSize = body.length();
+        }
         ret = NET_ECMS_PutPTXMLConfig(userId, &ptParam);
     } else if (method == "POST") {
+        // Attempt 1: body as input parameter (pInBuffer)
+        if (!body.empty()) {
+            ptParam.pInBuffer = (void*)body.c_str();
+            ptParam.dwInSize = body.length();
+        }
         ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
+
+        // Attempt 2: if error 17 (parameter error), retry with pCondBuffer
+        if (!ret && NET_ECMS_GetLastError() == 17 && !body.empty()) {
+            printf("[ISUP ISAPI] Retrying POST with pCondBuffer...\n");
+            ptParam.pInBuffer = NULL;
+            ptParam.dwInSize = 0;
+            ptParam.pCondBuffer = (void*)body.c_str();
+            ptParam.dwCondSize = body.length();
+            ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
+        }
+
+        // Attempt 3: General ISAPI PassThrough
         if (!ret) {
-            // Fallback to general ISAPIPassThrough
+            ptParam.pInBuffer = (void*)body.c_str();
+            ptParam.dwInSize = body.length();
+            ptParam.pCondBuffer = NULL;
+            ptParam.dwCondSize = 0;
             ret = NET_ECMS_ISAPIPassThrough(userId, &ptParam);
         }
     } else if (method == "DELETE") {
         ret = NET_ECMS_DeletePTXMLConfig(userId, &ptParam);
     } else {
+        // GET
+        if (!body.empty()) {
+            ptParam.pCondBuffer = (void*)body.c_str();
+            ptParam.dwCondSize = body.length();
+        }
         ret = NET_ECMS_GetPTXMLConfig(userId, &ptParam);
         if (!ret) {
             ret = NET_ECMS_ISAPIPassThrough(userId, &ptParam);
