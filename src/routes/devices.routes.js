@@ -1855,6 +1855,9 @@ function createDevicesRouter(prisma) {
         (e) => e.major === 5 && (e.minor === 75 || e.minor === 38 || e.minor === 1) && e.employeeNoString
       );
 
+      // CRITICAL: Sort chronologically ascending (oldest punch first)
+      personEvents.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+
       // Cache all users in this organization for fast and accurate employee matching
       const allOrgUsers = await prisma.user.findMany({
         where: { organizationId },
@@ -2237,10 +2240,13 @@ function createDevicesRouter(prisma) {
   });
 
   // -------------------------------------------------------------------------
-  // Automatic Background Poller: Periodically sync punches every 30 seconds
-  // Automatically detects when someone scans face or finger at the machine
+  // Biometric Terminal Sync Engine:
+  // - Quick Mode: Polls today and yesterday (instant, 1-2 seconds for UI button)
+  // - Custom Date Range Mode: Syncs exact startDate and endDate
+  // - Full/Historical Mode: Intelligent catch-up covering history
+  // Face sync & photo upload is deferred non-blocking to keep attendance fast
   // -------------------------------------------------------------------------
-  async function pollAllOnlineDevices(targetOrgId = null) {
+  async function pollAllOnlineDevices(targetOrgId = null, options = {}) {
     try {
       const activeDevices = await prisma.biometricDevice.findMany({
         where: {
@@ -2256,97 +2262,45 @@ function createDevicesRouter(prisma) {
         const host = dev.ipAddress;
         const path = "/ISAPI/AccessControl/AcsEvent?format=json";
 
-        const probeBody = JSON.stringify({
-          AcsEventCond: {
-            searchID: "auto_1",
-            searchResultPosition: 0,
-            maxResults: 1,
-            major: 0,
-            minor: 0,
-          },
-        });
-
-        const totalMatches = await new Promise((resolve) => {
-          const req1 = https.request(
-            {
-              hostname: host,
-              port: 443,
-              path,
-              method: "POST",
-              rejectUnauthorized: false,
-              timeout: 4000,
-              headers: { "Content-Type": "application/json", "Content-Length": 0 },
-            },
-            (res1) => {
-              if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-                const auth = res1.headers["www-authenticate"];
-                const digest = buildDigestHeader("POST", path, user, pass, auth);
-                const req2 = https.request(
-                  {
-                    hostname: host,
-                    port: 443,
-                    path,
-                    method: "POST",
-                    rejectUnauthorized: false,
-                    timeout: 4000,
-                    headers: {
-                      "Content-Type": "application/json",
-                      "Content-Length": Buffer.byteLength(probeBody),
-                      Authorization: digest,
-                    },
-                  },
-                  (res2) => {
-                    let b = "";
-                    res2.on("data", (c) => (b += c));
-                    res2.on("end", () => {
-                      try {
-                        const parsed = JSON.parse(b);
-                        resolve(Number(parsed.AcsEvent?.totalMatches || 0));
-                      } catch (e) {
-                        resolve(0);
-                      }
-                    });
-                  }
-                );
-                req2.on("error", () => resolve(0));
-                req2.on("timeout", () => { req2.destroy(); resolve(0); });
-                req2.write(probeBody);
-                req2.end();
-              } else {
-                resolve(0);
-              }
-            }
-          );
-          req1.on("error", () => resolve(0));
-          req1.on("timeout", () => { req1.destroy(); resolve(0); });
-          req1.end();
-        });
-        // Intelligent Catch-up Sync:
-        // Automatically check the last punch saved in DB for this device.
-        // If DB has old logs, start syncing from the last recorded date up to today (covering months/year of offline gap!).
-        // If brand new or empty, default to 365 days (1 full year) of history.
-        const latestDbLog = await prisma.biometricRawLog.findFirst({
-          where: { deviceSerialNumber: dev.deviceSerialNumber },
-          orderBy: { punchTime: "desc" },
-          select: { punchTime: true },
-        });
-
         const now = new Date();
-        const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
-        const syncStartDate = latestDbLog?.punchTime
-          ? new Date(Math.max(oneYearAgo.getTime(), latestDbLog.punchTime.getTime() - 24 * 60 * 60 * 1000))
-          : oneYearAgo;
+        let startTime, endTime;
 
-        const startYMD = syncStartDate.toLocaleDateString("en-CA");
-        const endYMD = now.toLocaleDateString("en-CA");
-        const startTime = `${startYMD}T00:00:00`;
-        const endTime = `${endYMD}T23:59:59`;
+        if (options.startDate && options.endDate) {
+          startTime = `${options.startDate}T00:00:00`;
+          endTime = `${options.endDate}T23:59:59`;
+        } else if (options.quick !== false) {
+          // Default Quick Mode: Today and Yesterday (Super fast, 1-2 seconds!)
+          const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+          const startYMD = yesterday.toLocaleDateString("en-CA");
+          const endYMD = now.toLocaleDateString("en-CA");
+          startTime = `${startYMD}T00:00:00`;
+          endTime = `${endYMD}T23:59:59`;
+        } else {
+          // Full/Historical catch-up
+          const latestDbLog = await prisma.biometricRawLog.findFirst({
+            where: { deviceSerialNumber: dev.deviceSerialNumber },
+            orderBy: { punchTime: "desc" },
+            select: { punchTime: true },
+          });
 
+          const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+          const syncStartDate = latestDbLog?.punchTime
+            ? new Date(Math.max(oneYearAgo.getTime(), latestDbLog.punchTime.getTime() - 24 * 60 * 60 * 1000))
+            : oneYearAgo;
+
+          const startYMD = syncStartDate.toLocaleDateString("en-CA");
+          const endYMD = now.toLocaleDateString("en-CA");
+          startTime = `${startYMD}T00:00:00`;
+          endTime = `${endYMD}T23:59:59`;
+        }
 
         let eventsList = [];
         let pos = 0;
+        const maxBatches = options.quick !== false ? 5 : 50;
+        let batchCount = 0;
 
-        while (true) {
+        while (batchCount < maxBatches) {
+          batchCount++;
           const fetchBody = JSON.stringify({
             AcsEventCond: {
               searchID: `auto_${Date.now()}`,
@@ -2426,6 +2380,9 @@ function createDevicesRouter(prisma) {
         );
 
         if (personEvents.length === 0) continue;
+
+        // CRITICAL: Sort chronologically ascending (oldest punch first) so morning check-in is processed before afternoon/evening check-out!
+        personEvents.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
 
         const allOrgUsers = await prisma.user.findMany({
           where: { organizationId: dev.organizationId },
@@ -2570,198 +2527,201 @@ function createDevicesRouter(prisma) {
           });
         }
 
-        // Automatic Biometric Status Sync: Always keep employee bio badges 100% matched with terminal hardware!
-        try {
-          // Helper: make an authenticated request to device (prioritizes reverse tunnel)
-          const deviceRequest = async (method, reqPath, bodyStr = null) => {
-            if (isDeviceTunnelOnline(dev.deviceSerialNumber)) {
-              try {
-                const resp = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
-                  method,
-                  path: reqPath,
-                  body: bodyStr,
-                  timeout: 8000,
-                });
-                if (resp && resp.data) {
-                  return Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data));
+        // Deferred Non-blocking Biometric Status & Face Sync:
+        // Do NOT block UI response for face photo sync or avatar upload.
+        // Run asynchronously in the background so Attendance Sync finishes in 1-2 seconds!
+        setImmediate(async () => {
+          try {
+            // Helper: make an authenticated request to device (prioritizes reverse tunnel)
+            const deviceRequest = async (method, reqPath, bodyStr = null) => {
+              if (isDeviceTunnelOnline(dev.deviceSerialNumber)) {
+                try {
+                  const resp = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
+                    method,
+                    path: reqPath,
+                    body: bodyStr,
+                    timeout: 8000,
+                  });
+                  if (resp && resp.data) {
+                    return Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data));
+                  }
+                } catch (e) {
+                  // fall through to direct network
                 }
-              } catch (e) {
-                // fall through to direct network
               }
-            }
 
-            return new Promise((resolve) => {
-              const bodyBuf = bodyStr ? Buffer.from(bodyStr) : null;
-              const headers = { "Content-Type": "application/json" };
-              if (bodyBuf) headers["Content-Length"] = bodyBuf.length;
-              else headers["Content-Length"] = 0;
+              return new Promise((resolve) => {
+                const bodyBuf = bodyStr ? Buffer.from(bodyStr) : null;
+                const headers = { "Content-Type": "application/json" };
+                if (bodyBuf) headers["Content-Length"] = bodyBuf.length;
+                else headers["Content-Length"] = 0;
 
-              const req1 = https.request(
-                { hostname: host, port: 443, path: reqPath, method, rejectUnauthorized: false, timeout: 6000, headers },
-                (res1) => {
-                  const drain = (r) => { r.resume(); };
-                  if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-                    drain(res1);
-                    const digest = buildDigestHeader(method, reqPath, user, pass, res1.headers["www-authenticate"]);
-                    const authHeaders = { ...headers, Authorization: digest };
-                    const req2 = https.request(
-                      { hostname: host, port: 443, path: reqPath, method, rejectUnauthorized: false, timeout: 8000, headers: authHeaders },
-                      (res2) => {
-                        const chunks = [];
-                        res2.on("data", (c) => chunks.push(c));
-                        res2.on("end", () => resolve(Buffer.concat(chunks)));
-                      }
-                    );
-                    req2.on("error", () => resolve(null));
-                    req2.on("timeout", () => { req2.destroy(); resolve(null); });
-                    if (bodyBuf) req2.write(bodyBuf);
-                    req2.end();
-                  } else if (res1.statusCode === 200) {
-                    const chunks = [];
-                    res1.on("data", (c) => chunks.push(c));
-                    res1.on("end", () => resolve(Buffer.concat(chunks)));
-                  } else {
-                    drain(res1);
-                    resolve(null);
+                const req1 = https.request(
+                  { hostname: host, port: 443, path: reqPath, method, rejectUnauthorized: false, timeout: 6000, headers },
+                  (res1) => {
+                    const drain = (r) => { r.resume(); };
+                    if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                      drain(res1);
+                      const digest = buildDigestHeader(method, reqPath, user, pass, res1.headers["www-authenticate"]);
+                      const authHeaders = { ...headers, Authorization: digest };
+                      const req2 = https.request(
+                        { hostname: host, port: 443, path: reqPath, method, rejectUnauthorized: false, timeout: 8000, headers: authHeaders },
+                        (res2) => {
+                          const chunks = [];
+                          res2.on("data", (c) => chunks.push(c));
+                          res2.on("end", () => resolve(Buffer.concat(chunks)));
+                        }
+                      );
+                      req2.on("error", () => resolve(null));
+                      req2.on("timeout", () => { req2.destroy(); resolve(null); });
+                      if (bodyBuf) req2.write(bodyBuf);
+                      req2.end();
+                    } else if (res1.statusCode === 200) {
+                      const chunks = [];
+                      res1.on("data", (c) => chunks.push(c));
+                      res1.on("end", () => resolve(Buffer.concat(chunks)));
+                    } else {
+                      drain(res1);
+                      resolve(null);
+                    }
+                  }
+                );
+                req1.on("error", () => resolve(null));
+                req1.on("timeout", () => { req1.destroy(); resolve(null); });
+                if (bodyBuf) req1.write(bodyBuf);
+                req1.end();
+              });
+            };
+
+            // Step 1: Fetch terminal UserInfo to reconcile fingerprint & face counts for ALL users
+            const termPersonNameByNo = new Map();
+            let uPos = 0;
+            while (true) {
+              const uPath = "/ISAPI/AccessControl/UserInfo/Search?format=json";
+              const uBody = JSON.stringify({
+                UserInfoSearchCond: { searchID: `fs_u_${uPos}`, searchResultPosition: uPos, maxResults: 50 },
+              });
+              const uBuf = await deviceRequest("POST", uPath, uBody);
+              if (!uBuf) break;
+              let uData = null;
+              try { uData = JSON.parse(uBuf.toString()); } catch { break; }
+              const uList = uData?.UserInfoSearch?.UserInfo || [];
+              for (const u of uList) {
+                if (!u.employeeNo) continue;
+                const rawNo = String(u.employeeNo).trim();
+                termPersonNameByNo.set(rawNo, u.name || "");
+
+                // Sync biometric permission badges (face & fingerprint) to DB accurately reflecting terminal state
+                const numOfFace = Number(u.numOfFace || 0);
+                const numOfFP = Number(u.numOfFP || 0);
+                const matchedUser = findUser(rawNo, u.name || "");
+                if (matchedUser && matchedUser.role !== "OWNER") {
+                  const perms = Array.isArray(matchedUser.permissions) ? matchedUser.permissions : [];
+                  const basePerms = perms.filter((p) => typeof p === "string" && !p.startsWith("bio:"));
+                  const newPerms = [...basePerms];
+                  if (numOfFP > 0) newPerms.push("bio:fingerprint");
+                  if (numOfFace > 0) newPerms.push("bio:face");
+
+                  const sortedCurrent = [...perms].sort().join(",");
+                  const sortedNew = [...newPerms].sort().join(",");
+
+                  if (sortedCurrent !== sortedNew) {
+                    await prisma.user.update({
+                      where: { id: matchedUser.id },
+                      data: { permissions: newPerms },
+                    });
+                    matchedUser.permissions = newPerms;
                   }
                 }
-              );
-              req1.on("error", () => resolve(null));
-              req1.on("timeout", () => { req1.destroy(); resolve(null); });
-              if (bodyBuf) req1.write(bodyBuf);
-              req1.end();
-            });
-          };
+              }
+              uPos += uList.length;
+              if (uList.length < 50 || uPos >= (uData?.UserInfoSearch?.totalMatches || 0)) break;
+            }
 
-          // Step 1: Fetch terminal UserInfo to reconcile fingerprint & face counts for ALL users
-          const termPersonNameByNo = new Map();
-          let uPos = 0;
-          while (true) {
-            const uPath = "/ISAPI/AccessControl/UserInfo/Search?format=json";
-            const uBody = JSON.stringify({
-              UserInfoSearchCond: { searchID: `fs_u_${uPos}`, searchResultPosition: uPos, maxResults: 50 },
-            });
-            const uBuf = await deviceRequest("POST", uPath, uBody);
-            if (!uBuf) break;
-            let uData = null;
-            try { uData = JSON.parse(uBuf.toString()); } catch { break; }
-            const uList = uData?.UserInfoSearch?.UserInfo || [];
-            for (const u of uList) {
-              if (!u.employeeNo) continue;
-              const rawNo = String(u.employeeNo).trim();
-              termPersonNameByNo.set(rawNo, u.name || "");
-
-              // Sync biometric permission badges (face & fingerprint) to DB accurately reflecting terminal state
-              const numOfFace = Number(u.numOfFace || 0);
-              const numOfFP = Number(u.numOfFP || 0);
-              const matchedUser = findUser(rawNo, u.name || "");
-              if (matchedUser && matchedUser.role !== "OWNER") {
-                const perms = Array.isArray(matchedUser.permissions) ? matchedUser.permissions : [];
-                // Filter out previous bio tags and rebuild strictly from actual terminal enrollment counts
-                const basePerms = perms.filter((p) => typeof p === "string" && !p.startsWith("bio:"));
-                const newPerms = [...basePerms];
-                if (numOfFP > 0) newPerms.push("bio:fingerprint");
-                if (numOfFace > 0) newPerms.push("bio:face");
-
-                const sortedCurrent = [...perms].sort().join(",");
-                const sortedNew = [...newPerms].sort().join(",");
-
-                if (sortedCurrent !== sortedNew) {
-                  await prisma.user.update({
-                    where: { id: matchedUser.id },
-                    data: { permissions: newPerms },
+            // Step 2: Fetch and sync face photos only if new punches or new face detected
+            if (newRawCount > 0) {
+              const allMatchList = [];
+              for (const libType of ["staticWhite", "blackFD"]) {
+                let fdPos = 0;
+                while (true) {
+                  const fdPath = "/ISAPI/Intelligent/FDLib/FDSearch?format=json";
+                  const fdBody = JSON.stringify({
+                    searchResultPosition: fdPos,
+                    maxResults: 50,
+                    faceLibType: libType,
+                    FDID: "1",
                   });
-                  matchedUser.permissions = newPerms;
+                  const fdBuf = await deviceRequest("POST", fdPath, fdBody);
+                  if (!fdBuf) break;
+                  let fdData = null;
+                  try { fdData = JSON.parse(fdBuf.toString()); } catch { break; }
+                  const batch = fdData?.MatchList || [];
+                  allMatchList.push(...batch);
+                  fdPos += batch.length;
+                  if (batch.length < 50 || fdPos >= (fdData?.totalMatches || 0)) break;
+                }
+              }
+
+              const processedEmpIds = new Set();
+              for (const m of allMatchList) {
+                const fpid = String(m.FPID || "").trim();
+                const faceURL = m.faceURL;
+                if (!fpid || !faceURL) continue;
+
+                const terminalPersonName = termPersonNameByNo.get(fpid) || "";
+                const empToUpdate = findUser(fpid, terminalPersonName);
+                if (!empToUpdate || empToUpdate.role === "OWNER" || empToUpdate.avatarUrl || processedEmpIds.has(empToUpdate.id)) continue;
+
+                let getPath;
+                try {
+                  const urlObj = new URL(faceURL);
+                  getPath = urlObj.pathname + urlObj.search;
+                } catch {
+                  getPath = faceURL;
+                }
+
+                const imgBuf = await deviceRequest("GET", getPath);
+                if (!imgBuf || imgBuf.length < 500) continue;
+
+                const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "jawcusfd";
+                const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET || "ekhone-hrms";
+                const base64Data = `data:image/jpeg;base64,${imgBuf.toString("base64")}`;
+                const formData = new FormData();
+                formData.append("file", base64Data);
+                formData.append("upload_preset", uploadPreset);
+                formData.append("folder", "hrms/employee-avatars");
+                formData.append("public_id", `emp_${empToUpdate.id}_face`);
+
+                try {
+                  const upRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+                    method: "POST",
+                    body: formData,
+                  });
+                  const upJson = await upRes.json();
+                  if (upJson.secure_url) {
+                    const existingPerms = Array.isArray(empToUpdate.permissions) ? empToUpdate.permissions : [];
+                    const updatedPerms = Array.from(new Set([...existingPerms, "bio:face"]));
+
+                    await prisma.user.update({
+                      where: { id: empToUpdate.id },
+                      data: {
+                        avatarUrl: upJson.secure_url,
+                        permissions: updatedPerms,
+                      },
+                    });
+                    empToUpdate.avatarUrl = upJson.secure_url;
+                    empToUpdate.permissions = updatedPerms;
+                    processedEmpIds.add(empToUpdate.id);
+                  }
+                } catch (upErr) {
+                  console.warn(`[Auto-Face] Upload error:`, upErr.message);
                 }
               }
             }
-            uPos += uList.length;
-            if (uList.length < 50 || uPos >= (uData?.UserInfoSearch?.totalMatches || 0)) break;
+          } catch (faceErr) {
+            console.warn(`[Auto-Bio] Sync error for device ${host}:`, faceErr.message);
           }
-
-          // Step 2: Fetch and sync face photos only if new punches or new face detected
-          if (newRawCount > 0) {
-            const allMatchList = [];
-            for (const libType of ["staticWhite", "blackFD"]) {
-              let fdPos = 0;
-              while (true) {
-                const fdPath = "/ISAPI/Intelligent/FDLib/FDSearch?format=json";
-                const fdBody = JSON.stringify({
-                  searchResultPosition: fdPos,
-                  maxResults: 50,
-                  faceLibType: libType,
-                  FDID: "1",
-                });
-                const fdBuf = await deviceRequest("POST", fdPath, fdBody);
-                if (!fdBuf) break;
-                let fdData = null;
-                try { fdData = JSON.parse(fdBuf.toString()); } catch { break; }
-                const batch = fdData?.MatchList || [];
-                allMatchList.push(...batch);
-                fdPos += batch.length;
-                if (batch.length < 50 || fdPos >= (fdData?.totalMatches || 0)) break;
-              }
-            }
-
-            const processedEmpIds = new Set();
-            for (const m of allMatchList) {
-              const fpid = String(m.FPID || "").trim();
-              const faceURL = m.faceURL;
-              if (!fpid || !faceURL) continue;
-
-              const terminalPersonName = termPersonNameByNo.get(fpid) || "";
-              const empToUpdate = findUser(fpid, terminalPersonName);
-              if (!empToUpdate || empToUpdate.role === "OWNER" || empToUpdate.avatarUrl || processedEmpIds.has(empToUpdate.id)) continue;
-
-              let getPath;
-              try {
-                const urlObj = new URL(faceURL);
-                getPath = urlObj.pathname + urlObj.search;
-              } catch {
-                getPath = faceURL;
-              }
-
-              const imgBuf = await deviceRequest("GET", getPath);
-              if (!imgBuf || imgBuf.length < 500) continue;
-
-              const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "jawcusfd";
-              const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET || "ekhone-hrms";
-              const base64Data = `data:image/jpeg;base64,${imgBuf.toString("base64")}`;
-              const formData = new FormData();
-              formData.append("file", base64Data);
-              formData.append("upload_preset", uploadPreset);
-              formData.append("folder", "hrms/employee-avatars");
-              formData.append("public_id", `emp_${empToUpdate.id}_face`);
-
-              try {
-                const upRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
-                  method: "POST",
-                  body: formData,
-                });
-                const upJson = await upRes.json();
-                if (upJson.secure_url) {
-                  const existingPerms = Array.isArray(empToUpdate.permissions) ? empToUpdate.permissions : [];
-                  const updatedPerms = Array.from(new Set([...existingPerms, "bio:face"]));
-
-                  await prisma.user.update({
-                    where: { id: empToUpdate.id },
-                    data: {
-                      avatarUrl: upJson.secure_url,
-                      permissions: updatedPerms,
-                    },
-                  });
-                  empToUpdate.avatarUrl = upJson.secure_url;
-                  empToUpdate.permissions = updatedPerms;
-                  processedEmpIds.add(empToUpdate.id);
-                }
-              } catch (upErr) {
-                console.warn(`[Auto-Face] Upload error:`, upErr.message);
-              }
-            }
-          }
-        } catch (faceErr) {
-          console.warn(`[Auto-Bio] Sync error for device ${host}:`, faceErr.message);
-        }
+        });
       }
     } catch (err) {
       console.warn("Background device auto-poll cycle notice:", err.message);
@@ -2898,11 +2858,13 @@ function createDevicesRouter(prisma) {
 
   
   // POST /api/devices/sync-all
-  // On-demand: sync recent attendance punches from physical devices for current organization
+  // On-demand: sync attendance punches from physical devices for current organization
+  // Accepts optional { startDate, endDate, quick }
   router.post("/sync-all", authenticateToken, async (req, res, next) => {
     try {
       const organizationId = req.user.organizationId;
-      await pollAllOnlineDevices(organizationId);
+      const { startDate, endDate, quick } = req.body || {};
+      await pollAllOnlineDevices(organizationId, { startDate, endDate, quick });
       return res.status(200).json({ success: true, message: "Attendance synced successfully from devices." });
     } catch (err) {
       next(err);
