@@ -10,7 +10,7 @@
 #include "HCISUPAlarm.h"
 
 static volatile sig_atomic_t g_running = 1;
-static std::string g_isupKey = "12345678"; // Default fallback key if none provided
+static std::string g_isupKey = "ekhoneit1234"; // Default key
 
 void sig_handler(int sig) {
     g_running = 0;
