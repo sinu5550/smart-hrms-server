@@ -37,19 +37,27 @@ void forward_to_hrms(const char* deviceId, const char* employeeId, const char* e
         eventTime ? eventTime : "");
 
     const char* targetUrl = getenv("TARGET_WEBHOOK");
-    if (!targetUrl) {
-        targetUrl = "http://smart-hrm-software-server-th3fjn:7000/api/devices/webhook/push-log";
-    }
+    std::string primaryUrl = targetUrl ? targetUrl : "http://smart-hrm-software-server-th3fjn:7000/api/devices/webhook/push-log";
+    std::string fallbackUrl = "https://secure-api.creativeboxbd.com/api/devices/webhook/push-log";
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
-    curl_easy_setopt(curl, CURLOPT_URL, targetUrl);
+    curl_easy_setopt(curl, CURLOPT_URL, primaryUrl.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonPayload);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
 
     CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK && primaryUrl != fallbackUrl) {
+        printf("[ISUP Gateway] Primary webhook failed (%s). Retrying via public domain: %s\n", curl_easy_strerror(res), fallbackUrl.c_str());
+        curl_easy_setopt(curl, CURLOPT_URL, fallbackUrl.c_str());
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        res = curl_easy_perform(curl);
+    }
+
     if (res == CURLE_OK) {
         printf("[ISUP Gateway] ✓ Forwarded punch to HRMS: Employee %s\n", employeeId);
     } else {

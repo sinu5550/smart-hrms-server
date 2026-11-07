@@ -13,10 +13,21 @@ const activeTunnels = new Map();
 // Map of correlationId -> { resolve, reject, timer }
 const pendingRequests = new Map();
 
+// Dynamic working ISUP host resolution
+let g_workingIsupHost = process.env.ISUP_GATEWAY_HOST || "hikvision-gateway";
+const ISUP_CANDIDATE_HOSTS = [
+  process.env.ISUP_GATEWAY_HOST,
+  "hikvision-gateway",
+  "172.17.0.1",
+  "host.docker.internal",
+  "2.24.171.175",
+  "127.0.0.1",
+].filter(Boolean);
+
 // Helper to send ISAPI via the native Linux ISUP Gateway service
 function sendViaIsupGateway(method, path, body, timeout = 10000) {
   return new Promise((resolve, reject) => {
-    const isupHost = process.env.ISUP_GATEWAY_HOST || "hikvision-gateway";
+    const isupHost = g_workingIsupHost;
     const isupPort = process.env.ISUP_GATEWAY_PORT || 7661;
 
     const queryParams = new URLSearchParams({
@@ -74,17 +85,14 @@ function sendViaIsupGateway(method, path, body, timeout = 10000) {
 
 // Check if ISUP Gateway is online and has active device
 let g_isupGatewayOnline = false;
-async function checkIsupGatewayStatus() {
+async function probeSingleHost(host, port) {
   return new Promise((resolve) => {
-    const isupHost = process.env.ISUP_GATEWAY_HOST || "hikvision-gateway";
-    const isupPort = process.env.ISUP_GATEWAY_PORT || 7661;
-
     const req = http.get(
       {
-        host: isupHost,
-        port: isupPort,
+        host,
+        port,
         path: "/status",
-        timeout: 2000,
+        timeout: 1500,
       },
       (res) => {
         const chunks = [];
@@ -92,25 +100,36 @@ async function checkIsupGatewayStatus() {
         res.on("end", () => {
           try {
             const data = JSON.parse(Buffer.concat(chunks).toString());
-            g_isupGatewayOnline = !!data.online;
-            resolve(g_isupGatewayOnline);
+            resolve({ ok: true, data });
           } catch {
-            g_isupGatewayOnline = false;
-            resolve(false);
+            resolve({ ok: false });
           }
         });
       }
     );
-    req.on("error", () => {
-      g_isupGatewayOnline = false;
-      resolve(false);
-    });
+    req.on("error", () => resolve({ ok: false }));
     req.on("timeout", () => {
       req.destroy();
-      g_isupGatewayOnline = false;
-      resolve(false);
+      resolve({ ok: false });
     });
   });
+}
+
+async function checkIsupGatewayStatus() {
+  const port = process.env.ISUP_GATEWAY_PORT || 7661;
+  for (const host of ISUP_CANDIDATE_HOSTS) {
+    const res = await probeSingleHost(host, port);
+    if (res.ok && res.data) {
+      if (!g_isupGatewayOnline) {
+        console.log(`[ISUP Gateway Bridge] Connected to gateway at ${host}:${port}. Device online: ${res.data.online}`);
+      }
+      g_workingIsupHost = host;
+      g_isupGatewayOnline = !!res.data.online;
+      return g_isupGatewayOnline;
+    }
+  }
+  g_isupGatewayOnline = false;
+  return false;
 }
 
 // Periodically check ISUP gateway status
