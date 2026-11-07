@@ -10,7 +10,7 @@
 #include "HCISUPAlarm.h"
 
 static volatile sig_atomic_t g_running = 1;
-static std::string g_isupKey = "ekhoneit1234"; // Default key
+static std::string g_isupKey = "ekhoneit1234"; 
 
 void sig_handler(int sig) {
     g_running = 0;
@@ -52,10 +52,7 @@ void forward_to_hrms(const char* deviceId, const char* employeeId, const char* e
 
 // Device Registration & SessionKey Callback
 BOOL CALLBACK DeviceRegisterCB(LONG iUserID, DWORD dwDataType, void *pOutBuffer, DWORD dwOutLen, void *pInBuffer, DWORD dwInLen, void *pUser) {
-    printf("[ISUP SDK Callback] UserID: %ld, DataType: %u (ENUM_DEV_%s)\n", 
-        (long)iUserID, 
-        (unsigned int)dwDataType,
-        (dwDataType == 0 ? "ON" : (dwDataType == 3 ? "AUTH" : (dwDataType == 4 ? "SESSIONKEY" : "OTHER"))));
+    printf("[ISUP SDK Callback] UserID: %ld, DataType: %u\n", (long)iUserID, (unsigned int)dwDataType);
     fflush(stdout);
 
     // dwDataType == ENUM_DEV_ON (0): Device successfully online
@@ -69,20 +66,18 @@ BOOL CALLBACK DeviceRegisterCB(LONG iUserID, DWORD dwDataType, void *pOutBuffer,
         printf("======================================================\n\n");
         fflush(stdout);
 
-        // Populate server keep-alive config if requested in pInBuffer
         if (pInBuffer != NULL && dwInLen >= sizeof(NET_EHOME_SERVER_INFO_V50)) {
             NET_EHOME_SERVER_INFO_V50 *pServerInfo = (NET_EHOME_SERVER_INFO_V50 *)pInBuffer;
             pServerInfo->dwKeepAliveSec = 15;
             pServerInfo->dwTimeOutCount = 6;
         }
     }
-    // dwDataType == ENUM_DEV_AUTH (3): Device Auth Request for ISUP 5.0!
-    // The device sends its registration request and expects the server to provide the shared Encryption Key in pInBuffer
+    // dwDataType == ENUM_DEV_AUTH (3): Device Auth Request
     else if (dwDataType == ENUM_DEV_AUTH) {
         if (pInBuffer != NULL && dwInLen > 0) {
             memset(pInBuffer, 0, dwInLen);
             strncpy((char*)pInBuffer, g_isupKey.c_str(), dwInLen - 1);
-            printf("[ISUP SDK] 🔑 ENUM_DEV_AUTH Handled! Provided key '%s' to device.\n", g_isupKey.c_str());
+            printf("[ISUP SDK] 🔑 ENUM_DEV_AUTH Handled! Provided key '%s'\n", g_isupKey.c_str());
             fflush(stdout);
         }
     }
@@ -96,10 +91,19 @@ BOOL CALLBACK DeviceRegisterCB(LONG iUserID, DWORD dwDataType, void *pOutBuffer,
         memcpy(devSessionkey.sSessionKey, pDevInfo->struRegInfo.bySessionKey, sizeof(devSessionkey.sSessionKey));
 
         if (NET_ECMS_SetDeviceSessionKey(&devSessionkey)) {
-            printf("[ISUP SDK] ✓ Successfully set SessionKey for ISUP 5.0 Device %s\n", devSessionkey.sDeviceID);
+            printf("[ISUP SDK] ✓ Successfully set SessionKey for Device %s\n", devSessionkey.sDeviceID);
             fflush(stdout);
         } else {
             printf("[ISUP SDK] ❌ NET_ECMS_SetDeviceSessionKey failed: %d\n", NET_ECMS_GetLastError());
+            fflush(stdout);
+        }
+    }
+    // dwDataType == ENUM_DEV_DAS_REQ (5): DAS Redirect Request (CRITICAL FOR ISUP 5.0!)
+    else if (dwDataType == ENUM_DEV_DAS_REQ) {
+        if (pInBuffer != NULL && dwInLen > 0) {
+            memset(pInBuffer, 0, dwInLen);
+            snprintf((char*)pInBuffer, dwInLen, "{\"Type\":\"DAS\",\"DasInfo\":{\"Address\":\"2.24.171.175\",\"Port\":7660}}");
+            printf("[ISUP SDK] 📍 ENUM_DEV_DAS_REQ Handled! Redirecting device to 2.24.171.175:7660\n");
             fflush(stdout);
         }
     }
