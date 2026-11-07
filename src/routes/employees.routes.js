@@ -182,7 +182,7 @@ async function pushFaceToHikvisionDevices(prisma, organizationId, employee, imag
     ]);
 
     for (const dev of devices) {
-      if (!dev.ipAddress) continue;
+      if (!dev.ipAddress || dev.ipAddress === "10.0.0.2" || dev.ipAddress.startsWith("10.") || dev.ipAddress.startsWith("192.168.") || dev.ipAddress.startsWith("172.")) continue;
       const host = dev.ipAddress;
       const user = dev.username || "admin";
       const pass = dev.password || "";

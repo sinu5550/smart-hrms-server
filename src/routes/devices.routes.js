@@ -266,6 +266,11 @@ function createDevicesRouter(prisma) {
       const user = device.username || "admin";
       const pass = device.password || "";
       const host = device.ipAddress;
+      // If host is a private LAN IP (e.g. 192.168.x.x, 10.x.x.x), direct camera stream cannot cross router/NAT to cloud VPS
+      if (!host || host === "10.0.0.2" || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.")) {
+        return res.status(503).json({ message: "Camera snapshot is only available when accessed inside office LAN." });
+      }
+
       const isHttps = true; // Hikvision standard secure port 443
       const port = 443;
       const path = "/ISAPI/Streaming/channels/101/picture";
@@ -471,10 +476,31 @@ function createDevicesRouter(prisma) {
       const termPass = device.password || "";
       const host = device.ipAddress;
 
-      // Helper: Digest-auth POST to device, returns parsed JSON or null
-      const devicePost = (reqPath, bodyObj) =>
-        new Promise((resolve) => {
-          const bodyStr = JSON.stringify(bodyObj);
+      // Helper: Digest-auth POST to device, returns parsed JSON or null (ISUP Tunnel priority)
+      const devicePost = async (reqPath, bodyObj) => {
+        const bodyStr = JSON.stringify(bodyObj);
+
+        // Priority 1: Cloud ISUP Gateway Tunnel
+        try {
+          const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+            method: "POST",
+            path: reqPath,
+            body: bodyStr,
+            timeout: 10000,
+          });
+          if (resp && resp.data) {
+            return typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+          }
+        } catch (tErr) {
+          // fallback
+        }
+
+        // Direct HTTPS fallback (only if routable public host)
+        if (!host || host === "10.0.0.2" || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.")) {
+          return null;
+        }
+
+        return new Promise((resolve) => {
           const bodyBuf = Buffer.from(bodyStr);
           const headers = { "Content-Type": "application/json", "Content-Length": 0 };
           const req1 = https.request(
@@ -510,6 +536,7 @@ function createDevicesRouter(prisma) {
           req1.on("timeout", () => { req1.destroy(); resolve(null); });
           req1.end();
         });
+      };
 
       // Paginated fetch — get ALL users from terminal (no 100 limit)
       const userList = [];
@@ -1241,58 +1268,75 @@ function createDevicesRouter(prisma) {
         },
       });
 
-      // Send to Hikvision device via ISAPI PUT
-      await new Promise((resolve, reject) => {
-        const req1 = https.request(
-          {
-            hostname: host,
-            port: 443,
-            path,
-            method: "PUT",
-            rejectUnauthorized: false,
-            timeout: 6000,
-            headers: { "Content-Type": "application/json", "Content-Length": 0 },
-          },
-          (res1) => {
-            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-              const digest = buildDigestHeader("PUT", path, user, pass, res1.headers["www-authenticate"]);
-              const req2 = https.request(
-                {
-                  hostname: host,
-                  port: 443,
-                  path,
-                  method: "PUT",
-                  rejectUnauthorized: false,
-                  timeout: 7000,
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Content-Length": Buffer.byteLength(setupPayload),
-                    Authorization: digest,
+      // Send to Hikvision device via Cloud ISUP Tunnel or Direct
+      let registerSuccess = false;
+      try {
+        const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+          method: "PUT",
+          path,
+          body: setupPayload,
+          timeout: 10000,
+        });
+        if (resp && resp.statusCode >= 200 && resp.statusCode < 300) {
+          registerSuccess = true;
+        }
+      } catch (tErr) {
+        // fallback
+      }
+
+      if (!registerSuccess && host && host !== "10.0.0.2" && !host.startsWith("10.") && !host.startsWith("192.168.")) {
+        await new Promise((resolve, reject) => {
+          const req1 = https.request(
+            {
+              hostname: host,
+              port: 443,
+              path,
+              method: "PUT",
+              rejectUnauthorized: false,
+              timeout: 6000,
+              headers: { "Content-Type": "application/json", "Content-Length": 0 },
+            },
+            (res1) => {
+              if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                const digest = buildDigestHeader("PUT", path, user, pass, res1.headers["www-authenticate"]);
+                const req2 = https.request(
+                  {
+                    hostname: host,
+                    port: 443,
+                    path,
+                    method: "PUT",
+                    rejectUnauthorized: false,
+                    timeout: 7000,
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Content-Length": Buffer.byteLength(setupPayload),
+                      Authorization: digest,
+                    },
                   },
-                },
-                (res2) => {
-                  let b = "";
-                  res2.on("data", (c) => (b += c));
-                  res2.on("end", () => {
-                    if (res2.statusCode === 200) {
-                      resolve(b);
-                    } else {
-                      reject(new Error(`Hikvision device returned error code ${res2.statusCode}: ${b}`));
-                    }
-                  });
-                }
-              );
-              req2.on("error", reject);
-              req2.write(setupPayload);
-              req2.end();
-            } else {
-              reject(new Error(`Hikvision probe returned unexpected status ${res1.statusCode}`));
+                  (res2) => {
+                    let b = "";
+                    res2.on("data", (c) => (b += c));
+                    res2.on("end", () => {
+                      if (res2.statusCode === 200) {
+                        resolve(b);
+                      } else {
+                        reject(new Error(`Hikvision device returned error code ${res2.statusCode}: ${b}`));
+                      }
+                    });
+                  }
+                );
+                req2.on("error", reject);
+                req2.write(setupPayload);
+                req2.end();
+              } else {
+                reject(new Error(`Hikvision probe returned unexpected status ${res1.statusCode}`));
+              }
             }
-          }
-        );
-        req1.on("error", reject);
-        req1.end();
-      });
+          );
+          req1.on("error", reject);
+          req1.end();
+        }).catch((e) => console.warn("Direct register-person notice:", e.message));
+      }
 
       // Also update database employee record if matched (NEVER match or modify Owner)
       const trimmedNo = String(employeeNo).trim();
@@ -1385,57 +1429,75 @@ function createDevicesRouter(prisma) {
         },
       });
 
-      await new Promise((resolve, reject) => {
-        const req1 = https.request(
-          {
-            hostname: host,
-            port: 443,
-            path,
-            method: "PUT",
-            rejectUnauthorized: false,
-            timeout: 6000,
-            headers: { "Content-Type": "application/json", "Content-Length": 0 },
-          },
-          (res1) => {
-            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-              const digest = buildDigestHeader("PUT", path, user, pass, res1.headers["www-authenticate"]);
-              const req2 = https.request(
-                {
-                  hostname: host,
-                  port: 443,
-                  path,
-                  method: "PUT",
-                  rejectUnauthorized: false,
-                  timeout: 7000,
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Content-Length": Buffer.byteLength(delPayload),
-                    Authorization: digest,
+      // Send to Hikvision device via Cloud ISUP Tunnel or Direct
+      let delSuccess = false;
+      try {
+        const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+          method: "PUT",
+          path,
+          body: delPayload,
+          timeout: 10000,
+        });
+        if (resp && resp.statusCode >= 200 && resp.statusCode < 300) {
+          delSuccess = true;
+        }
+      } catch (tErr) {
+        // fallback
+      }
+
+      if (!delSuccess && host && host !== "10.0.0.2" && !host.startsWith("10.") && !host.startsWith("192.168.")) {
+        await new Promise((resolve, reject) => {
+          const req1 = https.request(
+            {
+              hostname: host,
+              port: 443,
+              path,
+              method: "PUT",
+              rejectUnauthorized: false,
+              timeout: 6000,
+              headers: { "Content-Type": "application/json", "Content-Length": 0 },
+            },
+            (res1) => {
+              if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                const digest = buildDigestHeader("PUT", path, user, pass, res1.headers["www-authenticate"]);
+                const req2 = https.request(
+                  {
+                    hostname: host,
+                    port: 443,
+                    path,
+                    method: "PUT",
+                    rejectUnauthorized: false,
+                    timeout: 7000,
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Content-Length": Buffer.byteLength(delPayload),
+                      Authorization: digest,
+                    },
                   },
-                },
-                (res2) => {
-                  let b = "";
-                  res2.on("data", (c) => (b += c));
-                  res2.on("end", () => {
-                    if (res2.statusCode === 200) {
-                      resolve(b);
-                    } else {
-                      reject(new Error(`Hikvision machine returned status ${res2.statusCode}: ${b}`));
-                    }
-                  });
-                }
-              );
-              req2.on("error", reject);
-              req2.write(delPayload);
-              req2.end();
-            } else {
-              reject(new Error(`Hikvision probe returned unexpected status ${res1.statusCode}`));
+                  (res2) => {
+                    let b = "";
+                    res2.on("data", (c) => (b += c));
+                    res2.on("end", () => {
+                      if (res2.statusCode === 200) {
+                        resolve(b);
+                      } else {
+                        reject(new Error(`Hikvision machine returned status ${res2.statusCode}: ${b}`));
+                      }
+                    });
+                  }
+                );
+                req2.on("error", reject);
+                req2.write(delPayload);
+                req2.end();
+              } else {
+                reject(new Error(`Hikvision probe returned unexpected status ${res1.statusCode}`));
+              }
             }
-          }
-        );
-        req1.on("error", reject);
-        req1.end();
-      });
+          );
+          req1.on("error", reject);
+          req1.end();
+        }).catch((e) => console.warn("Direct delete-person notice:", e.message));
+      }
 
       // Also clean up bio permissions if this user exists in DB
       try {
@@ -1527,7 +1589,7 @@ function createDevicesRouter(prisma) {
             }
           }
 
-          if (!userData) {
+          if (!userData && host && host !== "10.0.0.2" && !host.startsWith("10.") && !host.startsWith("192.168.")) {
             userData = await new Promise((resolve, reject) => {
               const req1 = https.request(
                 {
@@ -2796,9 +2858,29 @@ function createDevicesRouter(prisma) {
             const user = dev.username || "admin";
             const pass = dev.password || "";
 
-            // Helper: device request with Digest Auth
-            const deviceRequest = (method, reqPath, bodyStr = null) =>
-              new Promise((resolve) => {
+            // Helper: device request with Digest Auth (ISUP Tunnel priority)
+            const deviceRequest = async (method, reqPath, bodyStr = null) => {
+              // Priority 1: Cloud ISUP Gateway Tunnel
+              try {
+                const resp = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
+                  method,
+                  path: reqPath,
+                  body: bodyStr,
+                  timeout: 10000,
+                });
+                if (resp && resp.data) {
+                  return Buffer.from(typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data));
+                }
+              } catch (tErr) {
+                // fallback
+              }
+
+              // Direct HTTPS fallback (only if routable public host)
+              if (!host || host === "10.0.0.2" || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.")) {
+                return null;
+              }
+
+              return new Promise((resolve) => {
                 const bodyBuf = bodyStr ? Buffer.from(bodyStr) : null;
                 const headers = { "Content-Type": "application/json" };
                 if (bodyBuf) headers["Content-Length"] = bodyBuf.length;
@@ -2839,6 +2921,7 @@ function createDevicesRouter(prisma) {
                 if (bodyBuf) req1.write(bodyBuf);
                 req1.end();
               });
+            };
 
             let uPos = 0;
             const dbUsers = await prisma.user.findMany({ where: { organizationId, role: { not: "OWNER" } } });
