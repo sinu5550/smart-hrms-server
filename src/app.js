@@ -111,5 +111,6 @@ if (require.main === module) {
     console.log(`Enterprise HRMS Backend (Node.js/Express) live on port ${port}`);
   });
   setupDeviceTunnelServer(server);
+  setupIsupServer(prisma, process.env.ISUP_PORT || 7660);
 }
 
