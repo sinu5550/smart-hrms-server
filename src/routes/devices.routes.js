@@ -2289,21 +2289,27 @@ function createDevicesRouter(prisma) {
         const maxBatches = options.quick !== false ? 5 : 50;
         let batchCount = 0;
 
-        while (batchCount < maxBatches) {
-          batchCount++;
-          const fetchBody = JSON.stringify({
-            AcsEventCond: {
-              searchID: `auto_${Date.now()}`,
-              searchResultPosition: pos,
-              maxResults: 30,
-              major: 0,
-              minor: 0,
-              startTime,
-              endTime,
-            },
-          });
+        // Helper to query device events via ISUP Gateway or direct network
+        const queryDeviceBatch = async (bodyObj) => {
+          const bodyStr = JSON.stringify(bodyObj);
 
-          const batch = await new Promise((resolve) => {
+          if (isDeviceTunnelOnline(dev.deviceSerialNumber)) {
+            try {
+              const resp = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
+                method: "POST",
+                path,
+                body: bodyStr,
+                timeout: 8000,
+              });
+              if (resp && resp.data) {
+                return typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+              }
+            } catch (tErr) {
+              // fallback
+            }
+          }
+
+          return new Promise((resolve) => {
             const req1 = https.request(
               {
                 hostname: host,
@@ -2328,7 +2334,7 @@ function createDevicesRouter(prisma) {
                       timeout: 6000,
                       headers: {
                         "Content-Type": "application/json",
-                        "Content-Length": Buffer.byteLength(fetchBody),
+                        "Content-Length": Buffer.byteLength(bodyStr),
                         Authorization: digest,
                       },
                     },
@@ -2346,7 +2352,7 @@ function createDevicesRouter(prisma) {
                   );
                   req2.on("error", () => resolve(null));
                   req2.on("timeout", () => { req2.destroy(); resolve(null); });
-                  req2.write(fetchBody);
+                  req2.write(bodyStr);
                   req2.end();
                 } else {
                   resolve(null);
@@ -2356,6 +2362,21 @@ function createDevicesRouter(prisma) {
             req1.on("error", () => resolve(null));
             req1.on("timeout", () => { req1.destroy(); resolve(null); });
             req1.end();
+          });
+        };
+
+        while (batchCount < maxBatches) {
+          batchCount++;
+          const batch = await queryDeviceBatch({
+            AcsEventCond: {
+              searchID: `auto_${Date.now()}`,
+              searchResultPosition: pos,
+              maxResults: 30,
+              major: 0,
+              minor: 0,
+              startTime,
+              endTime,
+            },
           });
 
           const list = batch?.AcsEvent?.InfoList || [];
