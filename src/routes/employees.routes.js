@@ -4,6 +4,7 @@ const bcrypt = require("bcrypt");
 const https = require("https");
 const multer = require("multer");
 const { authenticateToken, requireRoles } = require("../middleware");
+const { sendDeviceCommandViaTunnel } = require("../device-tunnel");
 
 // Helper to push/update employee on all active Hikvision biometric terminals
 async function syncEmployeeToHikvisionDevices(prisma, organizationId, employee) {
@@ -51,12 +52,32 @@ async function syncEmployeeToHikvisionDevices(prisma, organizationId, employee) 
     });
 
     for (const dev of devices) {
-      if (!dev.ipAddress) continue;
+      if (!dev.deviceSerialNumber) continue;
+
+      // 1. Send via Cloud ISUP Gateway Tunnel
+      try {
+        console.log(`[Auto-Sync Employee] Pushing ${employee.fullName} (${terminalEmployeeNo}) to device ${dev.deviceSerialNumber}...`);
+        await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
+          method: "PUT",
+          path,
+          body: setupPayload,
+        });
+        console.log(`[Auto-Sync Employee] ✓ Successfully pushed ${employee.fullName} to device ${dev.deviceSerialNumber}`);
+        continue;
+      } catch (tunnelErr) {
+        console.warn(`[Auto-Sync Employee] Tunnel push skipped/failed for ${dev.deviceName}:`, tunnelErr.message);
+      }
+
+      // 2. Fallback to direct network only if routable public host
+      if (!dev.ipAddress || dev.ipAddress === "10.0.0.2" || dev.ipAddress.startsWith("10.") || dev.ipAddress.startsWith("192.168.")) {
+        continue;
+      }
+
       const host = dev.ipAddress;
       const user = dev.username || "admin";
       const pass = dev.password || "";
 
-      new Promise((resolve, reject) => {
+      new Promise((resolve) => {
         const req1 = https.request(
           {
             hostname: host,
@@ -683,18 +704,44 @@ function createEmployeesRouter(prisma) {
         where: { organizationId, employeeId },
       });
       if (existingId) {
-        return res.status(409).json({
-          message: `Employee ID "${employeeId}" is already taken in this organization.`,
-        });
+        if (existingId.isDeleted) {
+          // Free up soft-deleted slot so the ID can be reused immediately
+          await prisma.user.delete({ where: { id: existingId.id } }).catch(async () => {
+            await prisma.user.update({
+              where: { id: existingId.id },
+              data: {
+                employeeId: `${existingId.employeeId}_del_${Date.now()}`,
+                email: `${existingId.email}.del.${Date.now()}`,
+              },
+            });
+          });
+        } else {
+          return res.status(409).json({
+            message: `Employee ID "${employeeId}" is already taken in this organization.`,
+          });
+        }
       }
 
       const existingEmail = await prisma.user.findFirst({
         where: { email: (dto.email || "").trim().toLowerCase() },
       });
       if (existingEmail) {
-        return res.status(409).json({
-          message: `Work Email "${dto.email}" is already registered in the system.`,
-        });
+        if (existingEmail.isDeleted) {
+          // Free up soft-deleted slot so the email can be reused immediately
+          await prisma.user.delete({ where: { id: existingEmail.id } }).catch(async () => {
+            await prisma.user.update({
+              where: { id: existingEmail.id },
+              data: {
+                email: `${existingEmail.email}.del.${Date.now()}`,
+                employeeId: `${existingEmail.employeeId}_del_${Date.now()}`,
+              },
+            });
+          });
+        } else {
+          return res.status(409).json({
+            message: `Work Email "${dto.email}" is already registered in the system.`,
+          });
+        }
       }
 
       if (dto.phone) {
@@ -1059,10 +1106,23 @@ function createEmployeesRouter(prisma) {
         });
       }
 
-      // Hard delete employee record permanently from database
-      await prisma.user.delete({
-        where: { id },
-      });
+      // Hard delete employee record permanently from database, or safely free up unique keys
+      try {
+        await prisma.user.delete({
+          where: { id },
+        });
+      } catch (delErr) {
+        // If foreign key constraint prevents hard delete (e.g. historical punch logs), soft delete and free up unique keys!
+        await prisma.user.update({
+          where: { id },
+          data: {
+            isDeleted: true,
+            deletedAt: new Date(),
+            employeeId: `${user.employeeId}_del_${Date.now()}`,
+            email: `${user.email}.del.${Date.now()}`,
+          },
+        });
+      }
 
       return res.status(200).json({
         id,
