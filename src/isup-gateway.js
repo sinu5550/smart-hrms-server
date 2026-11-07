@@ -256,7 +256,7 @@ function setupIsupServer(prisma, isupPort = 7660) {
   });
 
   server.listen(isupPort, "0.0.0.0", () => {
-    console.log(`🚀 [Hikvision ISUP 5.0 Gateway] Live & Listening on TCP port ${isupPort}`);
+    console.log(`🚀 [Hikvision ISUP 5.0 Gateway] Live & Listening on TCP port ${isupPort} (Build v1.0.2 Ready)`);
   });
 
   return server;
