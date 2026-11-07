@@ -1499,7 +1499,7 @@ function createDevicesRouter(prisma) {
           const pass = device.password || "";
           const host = device.ipAddress;
 
-          // 1. Fetch Users directly with 5s timeout
+          // 1. Fetch Users via ISUP Bridge / Tunnel or direct
           const userPath = "/ISAPI/AccessControl/UserInfo/Search?format=json";
           const searchBody = JSON.stringify({
             UserInfoSearchCond: {
@@ -1509,60 +1509,79 @@ function createDevicesRouter(prisma) {
             },
           });
 
-          const userData = await new Promise((resolve, reject) => {
-            const req1 = https.request(
-              {
-                hostname: host,
-                port: 443,
-                path: userPath,
+          let userData = null;
+          if (isDeviceTunnelOnline(device.deviceSerialNumber)) {
+            try {
+              const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
                 method: "POST",
-                rejectUnauthorized: false,
-                timeout: 5000,
-                headers: { "Content-Type": "application/json", "Content-Length": 0 },
-              },
-              (res1) => {
-                if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-                  const auth = res1.headers["www-authenticate"];
-                  const digest = buildDigestHeader("POST", userPath, user, pass, auth);
-                  const req2 = https.request(
-                    {
-                      hostname: host,
-                      port: 443,
-                      path: userPath,
-                      method: "POST",
-                      rejectUnauthorized: false,
-                      timeout: 6000,
-                      headers: {
-                        "Content-Type": "application/json",
-                        "Content-Length": Buffer.byteLength(searchBody),
-                        Authorization: digest,
-                      },
-                    },
-                    (res2) => {
-                      let buf = "";
-                      res2.on("data", (c) => (buf += c));
-                      res2.on("end", () => {
-                        try {
-                          resolve(JSON.parse(buf));
-                        } catch (e) {
-                          reject(e);
-                        }
-                      });
-                    }
-                  );
-                  req2.on("error", reject);
-                  req2.on("timeout", () => { req2.destroy(); reject(new Error("UserInfo request timed out")); });
-                  req2.write(searchBody);
-                  req2.end();
-                } else {
-                  reject(new Error("Probe did not return 401"));
-                }
+                path: userPath,
+                body: searchBody,
+                timeout: 8000,
+              });
+              if (resp && resp.data) {
+                userData = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
               }
-            );
-            req1.on("error", reject);
-            req1.on("timeout", () => { req1.destroy(); reject(new Error("UserInfo probe timed out")); });
-            req1.end();
-          });
+            } catch (tErr) {
+              // fallback
+            }
+          }
+
+          if (!userData) {
+            userData = await new Promise((resolve, reject) => {
+              const req1 = https.request(
+                {
+                  hostname: host,
+                  port: 443,
+                  path: userPath,
+                  method: "POST",
+                  rejectUnauthorized: false,
+                  timeout: 5000,
+                  headers: { "Content-Type": "application/json", "Content-Length": 0 },
+                },
+                (res1) => {
+                  if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                    const auth = res1.headers["www-authenticate"];
+                    const digest = buildDigestHeader("POST", userPath, user, pass, auth);
+                    const req2 = https.request(
+                      {
+                        hostname: host,
+                        port: 443,
+                        path: userPath,
+                        method: "POST",
+                        rejectUnauthorized: false,
+                        timeout: 6000,
+                        headers: {
+                          "Content-Type": "application/json",
+                          "Content-Length": Buffer.byteLength(searchBody),
+                          Authorization: digest,
+                        },
+                      },
+                      (res2) => {
+                        let buf = "";
+                        res2.on("data", (c) => (buf += c));
+                        res2.on("end", () => {
+                          try {
+                            resolve(JSON.parse(buf));
+                          } catch (e) {
+                            reject(e);
+                          }
+                        });
+                      }
+                    );
+                    req2.on("error", reject);
+                    req2.on("timeout", () => { req2.destroy(); reject(new Error("UserInfo request timed out")); });
+                    req2.write(searchBody);
+                    req2.end();
+                  } else {
+                    reject(new Error("Probe did not return 401"));
+                  }
+                }
+              );
+              req1.on("error", reject);
+              req1.on("timeout", () => { req1.destroy(); reject(new Error("UserInfo probe timed out")); });
+              req1.end();
+            });
+          }
 
           const liveUsers = userData?.UserInfoSearch?.UserInfo || [];
           if (liveUsers.length > 0) {
