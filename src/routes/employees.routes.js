@@ -325,9 +325,10 @@ function createEmployeesRouter(prisma) {
 
       // 1. Determine which employment statuses should be counted in attendance
       let attendanceCountStatusCodes = ["ACTIVE", "ON_PROBATION"];
+      let statusConfigs = [];
       try {
-        const statusConfigs = await prisma.$queryRawUnsafe(
-          "SELECT code, count_in_attendance as \"countInAttendance\" FROM hrms.employment_status_configs WHERE organization_id = $1::uuid",
+        statusConfigs = await prisma.$queryRawUnsafe(
+          "SELECT code, name, count_in_attendance as \"countInAttendance\" FROM hrms.employment_status_configs WHERE organization_id = $1::uuid",
           organizationId
         );
         if (Array.isArray(statusConfigs) && statusConfigs.length > 0) {
@@ -340,11 +341,12 @@ function createEmployeesRouter(prisma) {
         // Fallback to active and on probation
       }
 
-      // Query employees matching those statuses (excluding owner)
+      // Query employees matching those statuses (excluding owner and attendanceExempt)
       const whereEmployees = {
         organizationId,
         isDeleted: false,
         status: { in: attendanceCountStatusCodes },
+        attendanceExempt: false,
         ...(ownerEmail ? { email: { not: ownerEmail } } : {}),
       };
 
@@ -356,10 +358,40 @@ function createEmployeesRouter(prisma) {
           fullName: true,
           avatarUrl: true,
           dateOfBirth: true,
+          status: true,
           department: { select: { id: true, name: true } },
           designation: { select: { id: true, name: true } },
         },
       });
+
+      // Calculate status breakdown for attendance-eligible employees
+      const codeToNameMap = {};
+      if (Array.isArray(statusConfigs)) {
+        statusConfigs.forEach((c) => {
+          codeToNameMap[c.code] = c.name;
+        });
+      }
+
+      const statusMap = new Map();
+      employees.forEach((emp) => {
+        const rawCode = emp.status || "ACTIVE";
+        const rawName = codeToNameMap[rawCode] || (rawCode === "ACTIVE" ? "Permanent" : rawCode.replace(/_/g, " "));
+        const formattedName = rawName
+          .toLowerCase()
+          .split(" ")
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(" ");
+
+        statusMap.set(formattedName, (statusMap.get(formattedName) || 0) + 1);
+      });
+
+      const statusBreakdown = Array.from(statusMap.entries()).map(([name, count]) => ({
+        name,
+        count,
+      }));
+
+      // e.g. "Permanent: 7, On Probation: 10, Intern: 1"
+      const statusSummary = statusBreakdown.map((s) => `${s.name}: ${s.count}`).join(", ");
 
       // 2. Out of work today (approved outwork requests for today)
       const now = new Date();
@@ -458,6 +490,8 @@ function createEmployeesRouter(prisma) {
 
       return res.status(200).json({
         totalActive: employees.length,
+        statusBreakdown,
+        statusSummary,
         outworkToday: outworkToday.map((item) => ({
           id: item.id,
           userId: item.userId,
