@@ -1,4 +1,3 @@
-const express = require("express");
 const crypto = require("crypto");
 const http = require("http");
 const https = require("https");
@@ -1697,96 +1696,29 @@ function createDevicesRouter(prisma) {
       const startTime = `${startYMD}T00:00:00`;
       const endTime = `${endYMD}T23:59:59`;
 
-      // 2. Probe total matches first
-      const probeBody = JSON.stringify({
-        AcsEventCond: {
-          searchID: "probe_total",
-          searchResultPosition: 0,
-          maxResults: 1,
-          major: 0,
-          minor: 0,
-          startTime,
-          endTime,
-        },
-      });
+      // 2. Helper to query device via ISUP Bridge / Tunnel / Direct HTTPS
+      const queryAcsEvents = async (bodyObj) => {
+        const bodyStr = JSON.stringify(bodyObj);
 
-      const totalMatches = await new Promise((resolve, reject) => {
-        const req1 = https.request(
-          {
-            hostname: host,
-            port: 443,
-            path,
-            method: "POST",
-            rejectUnauthorized: false,
-            timeout: 5000,
-            headers: { "Content-Type": "application/json", "Content-Length": 0 },
-          },
-          (res1) => {
-            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-              const auth = res1.headers["www-authenticate"];
-              const digest = buildDigestHeader("POST", path, user, pass, auth);
-              const req2 = https.request(
-                {
-                  hostname: host,
-                  port: 443,
-                  path,
-                  method: "POST",
-                  rejectUnauthorized: false,
-                  timeout: 6000,
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Content-Length": Buffer.byteLength(probeBody),
-                    Authorization: digest,
-                  },
-                },
-                (res2) => {
-                  let buf = "";
-                  res2.on("data", (c) => (buf += c));
-                  res2.on("end", () => {
-                    try {
-                      const parsed = JSON.parse(buf);
-                      resolve(Number(parsed.AcsEvent?.totalMatches || 0));
-                    } catch (e) {
-                      resolve(0);
-                    }
-                  });
-                }
-              );
-              req2.on("error", reject);
-              req2.write(probeBody);
-              req2.end();
-            } else {
-              resolve(0);
+        // Priority 1: Try ISUP Tunnel / Gateway
+        if (isDeviceTunnelOnline(device.deviceSerialNumber)) {
+          try {
+            const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+              method: "POST",
+              path,
+              body: bodyStr,
+              timeout: 10000,
+            });
+            if (resp && resp.data) {
+              return typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
             }
+          } catch (tErr) {
+            console.warn("[sync-punches via ISUP/Tunnel error, falling back to direct]", tErr.message);
           }
-        );
-        req1.on("error", reject);
-        req1.end();
-      });
+        }
 
-      if (totalMatches === 0) {
-        return res.status(200).json({ success: true, pulledCount: 0, message: "No event logs found on machine for selected date range." });
-      }
-
-      // 3. Paginated fetch — pull ALL events across the period (up to 2000 events)
-      let eventsList = [];
-      let pos = 0;
-      const BATCH_SIZE = 50;
-
-      while (true) {
-        const fetchBody = JSON.stringify({
-          AcsEventCond: {
-            searchID: `sync_${Date.now()}`,
-            searchResultPosition: pos,
-            maxResults: BATCH_SIZE,
-            major: 0,
-            minor: 0,
-            startTime,
-            endTime,
-          },
-        });
-
-        const batch = await new Promise((resolve) => {
+        // Priority 2: Direct network fallback
+        return new Promise((resolve) => {
           const req1 = https.request(
             {
               hostname: host,
@@ -1794,7 +1726,7 @@ function createDevicesRouter(prisma) {
               path,
               method: "POST",
               rejectUnauthorized: false,
-              timeout: 6000,
+              timeout: 5000,
               headers: { "Content-Type": "application/json", "Content-Length": 0 },
             },
             (res1) => {
@@ -1811,7 +1743,7 @@ function createDevicesRouter(prisma) {
                     timeout: 8000,
                     headers: {
                       "Content-Type": "application/json",
-                      "Content-Length": Buffer.byteLength(fetchBody),
+                      "Content-Length": Buffer.byteLength(bodyStr),
                       Authorization: digest,
                     },
                   },
@@ -1829,7 +1761,7 @@ function createDevicesRouter(prisma) {
                 );
                 req2.on("error", () => resolve(null));
                 req2.on("timeout", () => { req2.destroy(); resolve(null); });
-                req2.write(fetchBody);
+                req2.write(bodyStr);
                 req2.end();
               } else {
                 resolve(null);
@@ -1839,6 +1771,44 @@ function createDevicesRouter(prisma) {
           req1.on("error", () => resolve(null));
           req1.on("timeout", () => { req1.destroy(); resolve(null); });
           req1.end();
+        });
+      };
+
+      // Probe total matches first
+      const probeRes = await queryAcsEvents({
+        AcsEventCond: {
+          searchID: "probe_total",
+          searchResultPosition: 0,
+          maxResults: 1,
+          major: 0,
+          minor: 0,
+          startTime,
+          endTime,
+        },
+      });
+
+      const totalMatches = Number(probeRes?.AcsEvent?.totalMatches || 0);
+
+      if (totalMatches === 0) {
+        return res.status(200).json({ success: true, pulledCount: 0, message: "No event logs found on machine for selected date range." });
+      }
+
+      // 3. Paginated fetch — pull ALL events across the period (up to 2000 events)
+      let eventsList = [];
+      let pos = 0;
+      const BATCH_SIZE = 50;
+
+      while (true) {
+        const batch = await queryAcsEvents({
+          AcsEventCond: {
+            searchID: `sync_${Date.now()}`,
+            searchResultPosition: pos,
+            maxResults: BATCH_SIZE,
+            major: 0,
+            minor: 0,
+            startTime,
+            endTime,
+          },
         });
 
         const list = batch?.AcsEvent?.InfoList || [];
