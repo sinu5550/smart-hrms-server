@@ -319,7 +319,12 @@ function createEmployeesRouter(prisma) {
       const organizationId = req.user.organizationId;
       const org = await prisma.organization.findUnique({
         where: { id: organizationId },
-        select: { ownerEmail: true },
+        select: {
+          ownerEmail: true,
+          weekendDays: true,
+          hasRosterDuty: true,
+          rosterDepartmentIds: true,
+        },
       });
       const ownerEmail = org?.ownerEmail?.toLowerCase();
 
@@ -359,6 +364,8 @@ function createEmployeesRouter(prisma) {
           avatarUrl: true,
           dateOfBirth: true,
           status: true,
+          departmentId: true,
+          rosterOffDays: true,
           department: { select: { id: true, name: true } },
           designation: { select: { id: true, name: true } },
         },
@@ -488,10 +495,79 @@ function createEmployeesRouter(prisma) {
         })
         .sort((a, b) => a.day - b.day);
 
+      // 5. Day Off Employees Today (Roster Off or Organization Weekend or Public Holiday)
+      const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const todayDayName = dayNames[now.getDay()];
+
+      const orgWeekendDays = Array.isArray(org?.weekendDays) && org.weekendDays.length > 0
+        ? org.weekendDays
+        : ["Friday"];
+
+      const rosterDeptIds = Array.isArray(org?.rosterDepartmentIds)
+        ? org.rosterDepartmentIds
+        : [];
+      const orgHasRoster = Boolean(org?.hasRosterDuty);
+
+      // Check if today is a holiday
+      let holidayTitle = null;
+      try {
+        const holidaysToday = await prisma.holiday.findMany({
+          where: {
+            organizationId,
+            fromDate: { lte: todayEnd },
+            toDate: { gte: todayStart },
+          },
+          select: { title: true },
+        });
+        if (holidaysToday.length > 0) {
+          holidayTitle = holidaysToday[0].title;
+        }
+      } catch (e) {
+        // Ignore holiday check error if model isn't active
+      }
+
+      const dayOffEmployees = [];
+      employees.forEach((emp) => {
+        const isRosterEmp = Boolean(orgHasRoster && emp.departmentId && rosterDeptIds.includes(emp.departmentId));
+        const empRosterOffDays = Array.isArray(emp.rosterOffDays) ? emp.rosterOffDays : [];
+
+        let isOff = false;
+        let offType = "Day Off";
+
+        if (holidayTitle) {
+          isOff = true;
+          offType = holidayTitle;
+        } else if (isRosterEmp) {
+          if (empRosterOffDays.includes(todayDayName)) {
+            isOff = true;
+            offType = "Roster Off";
+          }
+        } else {
+          if (orgWeekendDays.includes(todayDayName)) {
+            isOff = true;
+            offType = "Weekly Off";
+          }
+        }
+
+        if (isOff) {
+          dayOffEmployees.push({
+            id: emp.id,
+            userId: emp.id,
+            fullName: emp.fullName,
+            employeeId: emp.employeeId,
+            avatarUrl: emp.avatarUrl || null,
+            department: emp.department?.name || "General",
+            offDayType: offType,
+            dayName: todayDayName,
+          });
+        }
+      });
+
       return res.status(200).json({
         totalActive: employees.length,
         statusBreakdown,
         statusSummary,
+        dayOffToday: dayOffEmployees,
         outworkToday: outworkToday.map((item) => ({
           id: item.id,
           userId: item.userId,
