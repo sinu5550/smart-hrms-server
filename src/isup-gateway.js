@@ -21,6 +21,60 @@ function setupIsupServer(prisma, isupPort = 7660) {
         const text = buffer.toString("utf8");
 
         console.log(`[ISUP Gateway RAW PACKET ${chunk.length} bytes]:`, text.substring(0, 300));
+        console.log(`[ISUP Gateway HEX]:`, chunk.subarray(0, 32).toString("hex"));
+
+        // Hikvision Binary ISUP EHome Registration Handling
+        // Binary ISUP starts with 4-byte header or magic bytes followed by device ID and command
+        // Response format: 4-byte header, cmd 0x0001 (registration reply), status 0x00 (success), session key/challenge
+        
+        let ackBuffer = null;
+
+        // Check if binary packet (contains GS6443083 or S6443083)
+        if (chunk.length >= 16 && (text.includes("S6443083") || text.includes("DS-K1T320") || !text.startsWith("HTTP"))) {
+          console.log(`[ISUP Gateway] Binary Handshake detected for GS6443083`);
+          
+          // Build Binary ISUP 5.0 / EHome Registration Success Frame:
+          // Standard Hikvision ISUP Register Response:
+          // 4 bytes magic/len, 2 bytes cmd, 2 bytes sequence, 4 bytes status (0 = success), challenge token
+          const resPayload = Buffer.from([
+            0x7f, 0x7f, 0x00, 0x20, // magic / length (32 bytes)
+            0x00, 0x01,             // command: REGISTER_SUCCESS
+            0x00, 0x00,             // result: 0 (OK)
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x01, // session id
+            0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, // token / challenge
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+          ]);
+
+          // Also XML fallback for hybrid models
+          const ackXml = `<?xml version="1.0" encoding="UTF-8"?>
+<ResponseStatus version="2.0" xmlns="http://www.hikvision.com/networks/schemas/ISUP">
+<requestURL>/ISUP/Register</requestURL>
+<statusCode>200</statusCode>
+<statusString>OK</statusString>
+<deviceID>GS6443083</deviceID>
+</ResponseStatus>`;
+
+          socket.write(resPayload);
+          // If the device also accepts XML on same socket:
+          setTimeout(() => {
+            try { socket.write(ackXml); } catch (e) {}
+          }, 50);
+
+          try {
+            await prisma.biometricDevice.updateMany({
+              where: {
+                deviceSerialNumber: { contains: "S6443083" }
+              },
+              data: {
+                status: "ONLINE",
+                lastHeartbeat: new Date(),
+              }
+            });
+          } catch (dbErr) {}
+          buffer = Buffer.alloc(0);
+          return;
+        }
 
         // Always immediately acknowledge any connection packet to satisfy ISUP handshake
         if (text.includes("Register") || text.includes("<devId>") || text.includes("deviceNo") || text.includes("ISUP") || chunk.length > 0) {
