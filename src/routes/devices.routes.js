@@ -1720,24 +1720,26 @@ function createDevicesRouter(prisma) {
       const queryAcsEvents = async (bodyObj) => {
         const bodyStr = JSON.stringify(bodyObj);
 
-        // Priority 1: Try ISUP Tunnel / Gateway
-        if (isDeviceTunnelOnline(device.deviceSerialNumber)) {
-          try {
-            const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
-              method: "POST",
-              path,
-              body: bodyStr,
-              timeout: 10000,
-            });
-            if (resp && resp.data) {
-              return typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
-            }
-          } catch (tErr) {
-            console.warn("[sync-punches via ISUP/Tunnel error, falling back to direct]", tErr.message);
+        // Priority 1: Always try ISUP Tunnel / Gateway first
+        try {
+          const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+            method: "POST",
+            path,
+            body: bodyStr,
+            timeout: 10000,
+          });
+          if (resp && resp.data) {
+            const parsed = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+            if (parsed && !parsed.error) return parsed;
           }
+        } catch (tErr) {
+          console.warn("[sync-punches via ISUP/Tunnel notice]:", tErr.message);
         }
 
-        // Priority 2: Direct network fallback
+        // Priority 2: Direct network fallback (only if routable public host)
+        if (!host || host === "10.0.0.2" || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.")) {
+          return null;
+        }
         return new Promise((resolve) => {
           const req1 = https.request(
             {
@@ -2312,20 +2314,29 @@ function createDevicesRouter(prisma) {
         const queryDeviceBatch = async (bodyObj) => {
           const bodyStr = JSON.stringify(bodyObj);
 
-          if (isDeviceTunnelOnline(dev.deviceSerialNumber)) {
-            try {
-              const resp = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
-                method: "POST",
-                path,
-                body: bodyStr,
-                timeout: 8000,
-              });
-              if (resp && resp.data) {
-                return typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+          // Always try cloud tunnel / ISUP Gateway first!
+          try {
+            console.log(`[Pull Attendance] Attempting ISUP tunnel query for device ${dev.deviceSerialNumber}...`);
+            const resp = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
+              method: "POST",
+              path,
+              body: bodyStr,
+              timeout: 10000,
+            });
+            if (resp && resp.data) {
+              const parsed = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+              if (parsed && !parsed.error) {
+                console.log(`[Pull Attendance] ✓ ISUP tunnel returned data:`, parsed?.AcsEvent ? `Matches: ${parsed.AcsEvent.totalMatches}` : "OK");
+                return parsed;
               }
-            } catch (tErr) {
-              // fallback
             }
+          } catch (tErr) {
+            console.warn(`[Pull Attendance] ISUP tunnel query attempt notice:`, tErr.message);
+          }
+
+          // If device host is a private/Docker IP (e.g. 10.x.x.x, 192.168.x.x), direct HTTPS from cloud VPS is impossible
+          if (!host || host === "10.0.0.2" || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.")) {
+            return null;
           }
 
           return new Promise((resolve) => {

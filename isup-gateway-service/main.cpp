@@ -216,20 +216,29 @@ BOOL CALLBACK AlarmMsgCallBack(LONG iHandle, NET_EHOME_ALARM_MSG *pAlarmMsg, voi
 // Pass-through ISAPI Command to device
 std::string execute_isapi(LONG userId, const std::string& method, const std::string& url, const std::string& body) {
     if (userId < 0) {
+        printf("[ISUP ISAPI] ⚠️ Rejected command: Device offline (userId < 0)\n");
+        fflush(stdout);
         return "{\"error\":\"Device offline or not registered\"}";
     }
+
+    // Clean URL: Strip any leading HTTP method if present
+    std::string cleanUrl = url;
+    if (cleanUrl.rfind("POST ", 0) == 0) cleanUrl = cleanUrl.substr(5);
+    else if (cleanUrl.rfind("GET ", 0) == 0) cleanUrl = cleanUrl.substr(4);
+    else if (cleanUrl.rfind("PUT ", 0) == 0) cleanUrl = cleanUrl.substr(4);
+    else if (cleanUrl.rfind("DELETE ", 0) == 0) cleanUrl = cleanUrl.substr(7);
 
     NET_EHOME_PTXML_PARAM ptParam;
     memset(&ptParam, 0, sizeof(ptParam));
 
-    // Formatted request URL including HTTP method (e.g. "PUT /ISAPI/AccessControl/UserInfo/SetUp?format=json")
-    std::string fullUrl = method + " " + url;
-    ptParam.pRequestUrl = (void*)fullUrl.c_str();
-    ptParam.dwRequestUrlLen = fullUrl.length();
+    ptParam.pRequestUrl = (void*)cleanUrl.c_str();
+    ptParam.dwRequestUrlLen = cleanUrl.length();
 
     if (!body.empty()) {
         ptParam.pInBuffer = (void*)body.c_str();
         ptParam.dwInSize = body.length();
+        ptParam.pCondBuffer = (void*)body.c_str();
+        ptParam.dwCondSize = body.length();
     }
 
     const DWORD OUT_BUF_SIZE = 1024 * 1024; // 1MB buffer
@@ -241,28 +250,43 @@ std::string execute_isapi(LONG userId, const std::string& method, const std::str
     ptParam.dwOutSize = OUT_BUF_SIZE;
     ptParam.dwRecvTimeOut = 8000;
 
+    printf("[ISUP ISAPI] 📡 Sending %s %s (body len: %zu) to UserID %ld...\n",
+           method.c_str(), cleanUrl.c_str(), body.length(), (long)userId);
+    fflush(stdout);
+
     BOOL ret = FALSE;
     if (method == "PUT") {
         ret = NET_ECMS_PutPTXMLConfig(userId, &ptParam);
     } else if (method == "POST") {
         ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
+        if (!ret) {
+            // Fallback to general ISAPIPassThrough
+            ret = NET_ECMS_ISAPIPassThrough(userId, &ptParam);
+        }
     } else if (method == "DELETE") {
         ret = NET_ECMS_DeletePTXMLConfig(userId, &ptParam);
     } else {
         ret = NET_ECMS_GetPTXMLConfig(userId, &ptParam);
+        if (!ret) {
+            ret = NET_ECMS_ISAPIPassThrough(userId, &ptParam);
+        }
     }
 
     std::string responseStr = "";
     if (ret && ptParam.dwReturnedXMLLen > 0) {
         responseStr = std::string(outBuffer, ptParam.dwReturnedXMLLen);
+        printf("[ISUP ISAPI] ✓ Command succeeded. ReturnedLen: %u bytes\n", (unsigned int)ptParam.dwReturnedXMLLen);
     } else if (ret && strlen(outBuffer) > 0) {
         responseStr = std::string(outBuffer);
+        printf("[ISUP ISAPI] ✓ Command succeeded. Response: %s\n", responseStr.substr(0, 150).c_str());
     } else {
         DWORD err = NET_ECMS_GetLastError();
+        printf("[ISUP ISAPI] ❌ Command failed. Error code: %u\n", (unsigned int)err);
         char errBuf[128];
         snprintf(errBuf, sizeof(errBuf), "{\"error\":\"NET_ECMS ISAPI call failed\",\"code\":%u}", (unsigned int)err);
         responseStr = errBuf;
     }
+    fflush(stdout);
 
     free(outBuffer);
     return responseStr;
