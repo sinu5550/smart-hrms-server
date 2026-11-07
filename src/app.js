@@ -17,6 +17,7 @@ const { createOutworkRouter } = require("./routes/outwork.routes");
 const { createLoansRouter } = require("./routes/loans.routes");
 const { createLeaveRouter } = require("./routes/leave.routes");
 const { setupDeviceTunnelServer } = require("./device-tunnel");
+const { setupIsupServer } = require("./isup-gateway");
 
 const app = express();
 
@@ -110,5 +111,6 @@ if (require.main === module) {
     console.log(`Enterprise HRMS Backend (Node.js/Express) live on port ${port}`);
   });
   setupDeviceTunnelServer(server);
+  setupIsupServer(prisma, process.env.ISUP_PORT || 7660);
 }
 
