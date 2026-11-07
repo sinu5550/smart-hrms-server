@@ -38,11 +38,18 @@ function createDepartmentsRouter(prisma) {
         where: { organizationId },
         include: {
           user: {
-            select: { id: true, fullName: true, employeeId: true, email: true, avatarUrl: true },
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              email: true,
+              avatarUrl: true,
+              department: {
+                select: { id: true, name: true },
+              },
+            },
           },
-          department: {
-            select: { id: true, name: true },
-          },
+          targetShift: true,
         },
         orderBy: { createdAt: "desc" },
       });
