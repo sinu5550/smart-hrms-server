@@ -27,9 +27,43 @@ function createDepartmentsRouter(prisma) {
     }
   });
 
+  // GET /api/departments/roster-shift-requests (Must be declared before /:id)
+  router.get("/roster-shift-requests", async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+
+      // Fetch pending requests for departments user is member or manager of
+      const requests = await prisma.rosterShiftRequest.findMany({
+        where: { organizationId },
+        include: {
+          user: {
+            select: { id: true, fullName: true, employeeId: true, email: true, avatarUrl: true },
+          },
+          department: {
+            select: { id: true, name: true },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return res.status(200).json(requests);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // GET /api/departments/:id
   router.get("/:id", async (req, res, next) => {
     try {
+      const isUUID = (val) =>
+        typeof val === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val.trim());
+
+      if (!isUUID(req.params.id)) {
+        return res.status(404).json({ message: "Department not found." });
+      }
+
       const dept = await prisma.department.findFirst({
         where: { id: req.params.id, organizationId: req.user.organizationId },
         include: {
