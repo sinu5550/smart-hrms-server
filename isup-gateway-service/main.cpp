@@ -98,12 +98,13 @@ BOOL CALLBACK DeviceRegisterCB(LONG iUserID, DWORD dwDataType, void *pOutBuffer,
             fflush(stdout);
         }
     }
-    // dwDataType == ENUM_DEV_DAS_REQ (5): DAS Redirect Request (CRITICAL FOR ISUP 5.0!)
+    // dwDataType == ENUM_DEV_DAS_REQ (5): Full Official DAS Info Format
     else if (dwDataType == ENUM_DEV_DAS_REQ) {
         if (pInBuffer != NULL && dwInLen > 0) {
             memset(pInBuffer, 0, dwInLen);
-            snprintf((char*)pInBuffer, dwInLen, "{\"Type\":\"DAS\",\"DasInfo\":{\"Address\":\"2.24.171.175\",\"Port\":7660}}");
-            printf("[ISUP SDK] 📍 ENUM_DEV_DAS_REQ Handled! Redirecting device to 2.24.171.175:7660\n");
+            snprintf((char*)pInBuffer, dwInLen, 
+                "{\"Type\":\"DAS\",\"DasInfo\":{\"Address\":\"2.24.171.175\",\"Domain\":\"secure-api.creativeboxbd.com\",\"ServerID\":\"das_2.24.171.175_7660\",\"Port\":7660,\"UdpPort\":7660}}");
+            printf("[ISUP SDK] 📍 ENUM_DEV_DAS_REQ Handled! Sent full DAS spec to device.\n");
             fflush(stdout);
         }
     }
