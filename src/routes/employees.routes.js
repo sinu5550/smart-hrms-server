@@ -854,14 +854,52 @@ function createEmployeesRouter(prisma) {
         }
       }
 
-      if (dto.phone) {
+      // Clean optional unique strings so empty strings are always NULL (preventing unique constraint collision)
+      const cleanNidOrPassport = (typeof dto.nidOrPassport === "string" && dto.nidOrPassport.trim())
+        ? dto.nidOrPassport.trim()
+        : null;
+
+      const cleanPhone = (typeof dto.phone === "string" && dto.phone.trim())
+        ? dto.phone.trim()
+        : null;
+
+      // Clean any existing empty-string records in database so they don't block new inserts
+      await prisma.$executeRawUnsafe("UPDATE hrms.users SET nid_or_passport = NULL WHERE nid_or_passport = ''").catch(() => {});
+      await prisma.$executeRawUnsafe("UPDATE hrms.users SET phone = NULL WHERE phone = ''").catch(() => {});
+
+      if (cleanNidOrPassport) {
+        const existingNid = await prisma.user.findFirst({
+          where: { organizationId, nidOrPassport: cleanNidOrPassport },
+        });
+        if (existingNid) {
+          if (existingNid.isDeleted) {
+            await prisma.user.update({
+              where: { id: existingNid.id },
+              data: { nidOrPassport: null },
+            });
+          } else {
+            return res.status(409).json({
+              message: `NID or Passport "${cleanNidOrPassport}" is already assigned to employee ${existingNid.fullName} (${existingNid.employeeId}).`,
+            });
+          }
+        }
+      }
+
+      if (cleanPhone) {
         const existingPhone = await prisma.user.findFirst({
-          where: { organizationId, phone: dto.phone },
+          where: { organizationId, phone: cleanPhone },
         });
         if (existingPhone) {
-          return res.status(409).json({
-            message: `Phone number "${dto.phone}" is already assigned to another employee.`,
-          });
+          if (existingPhone.isDeleted) {
+            await prisma.user.update({
+              where: { id: existingPhone.id },
+              data: { phone: null },
+            });
+          } else {
+            return res.status(409).json({
+              message: `Phone number "${cleanPhone}" is already assigned to another employee.`,
+            });
+          }
         }
       }
 
@@ -891,7 +929,7 @@ function createEmployeesRouter(prisma) {
           employeeId,
           email: dto.email.toLowerCase().trim(),
           fullName: dto.fullName,
-          phone: dto.phone,
+          phone: cleanPhone,
           role: dto.role || "EMPLOYEE",
           departmentId: dto.departmentId,
           designationId: dto.designationId,
@@ -906,7 +944,7 @@ function createEmployeesRouter(prisma) {
           emergencyContactName: dto.emergencyContactName,
           emergencyContactPhone: dto.emergencyContactPhone,
           emergencyContactRelation: dto.emergencyContactRelation,
-          nidOrPassport: dto.nidOrPassport,
+          nidOrPassport: cleanNidOrPassport,
           dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
           gender: dto.gender,
           joiningDate: dto.joiningDate ? new Date(dto.joiningDate) : undefined,
@@ -1051,10 +1089,25 @@ function createEmployeesRouter(prisma) {
         }
       }
 
-      if (dto.phone && dto.phone !== user.phone) {
-        const phoneCollision = await prisma.user.findFirst({ where: { organizationId, phone: dto.phone } });
+      const cleanNidOrPassport = dto.nidOrPassport !== undefined
+        ? ((typeof dto.nidOrPassport === "string" && dto.nidOrPassport.trim()) ? dto.nidOrPassport.trim() : null)
+        : undefined;
+
+      const cleanPhone = dto.phone !== undefined
+        ? ((typeof dto.phone === "string" && dto.phone.trim()) ? dto.phone.trim() : null)
+        : undefined;
+
+      if (cleanPhone && cleanPhone !== user.phone) {
+        const phoneCollision = await prisma.user.findFirst({ where: { organizationId, phone: cleanPhone, isDeleted: false } });
         if (phoneCollision && phoneCollision.id !== id) {
           return res.status(409).json({ message: "Phone number is already assigned to another employee." });
+        }
+      }
+
+      if (cleanNidOrPassport && cleanNidOrPassport !== user.nidOrPassport) {
+        const nidCollision = await prisma.user.findFirst({ where: { organizationId, nidOrPassport: cleanNidOrPassport, isDeleted: false } });
+        if (nidCollision && nidCollision.id !== id) {
+          return res.status(409).json({ message: "NID or Passport is already assigned to another employee." });
         }
       }
 
@@ -1081,7 +1134,7 @@ function createEmployeesRouter(prisma) {
           employeeId: trimmedEmpId || undefined,
           fullName: dto.fullName,
           email: normalizedEmail,
-          phone: dto.phone,
+          phone: cleanPhone,
           role: dto.role,
           departmentId: dto.departmentId,
           designationId: dto.designationId,
@@ -1093,7 +1146,7 @@ function createEmployeesRouter(prisma) {
           emergencyContactName: dto.emergencyContactName,
           emergencyContactPhone: dto.emergencyContactPhone,
           emergencyContactRelation: dto.emergencyContactRelation,
-          nidOrPassport: dto.nidOrPassport,
+          nidOrPassport: cleanNidOrPassport,
           dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
           gender: dto.gender,
           joiningDate: dto.joiningDate ? new Date(dto.joiningDate) : undefined,
@@ -1230,6 +1283,8 @@ function createEmployeesRouter(prisma) {
             deletedAt: new Date(),
             employeeId: `${user.employeeId}_del_${Date.now()}`,
             email: `${user.email}.del.${Date.now()}`,
+            phone: user.phone ? `${user.phone}_del_${Date.now()}` : null,
+            nidOrPassport: null,
           },
         });
       }
