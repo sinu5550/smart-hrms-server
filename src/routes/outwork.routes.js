@@ -1,5 +1,53 @@
 const express = require("express");
-const { authenticateToken, requireRoles } = require("../middleware");
+const { authenticateToken, requireRoles, resolveClientIp } = require("../middleware");
+
+// Helper to determine the organization's attendance date based on dayCutoffHour (Asia/Dhaka)
+async function getOrganizationAttendanceDate(prisma, organizationId, dateInput = new Date()) {
+  const org = await prisma.organization.findUnique({
+    where: { id: organizationId },
+    select: { dayCutoffHour: true },
+  });
+  const cutoffHour = org?.dayCutoffHour ?? 6;
+
+  const inputDate = new Date(dateInput);
+  const shifted = new Date(inputDate.getTime() - cutoffHour * 3600 * 1000);
+  const localYMD = shifted.toLocaleDateString("en-CA", { timeZone: "Asia/Dhaka" });
+  const [y, m, d] = localYMD.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+}
+
+// Helper to calculate shift status (PRESENT vs LATE)
+async function calculateShiftStatus(prisma, organizationId, userId, checkInDate) {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { shiftId: true },
+    });
+
+    let setting = user?.shiftId
+      ? await prisma.officeSetting.findUnique({ where: { id: user.shiftId } })
+      : null;
+
+    if (!setting) {
+      setting = await prisma.officeSetting.findFirst({
+        where: { organizationId, isDefault: true },
+      });
+    }
+
+    const startTimeStr = setting?.startTime || "09:00";
+    const graceMinutes = setting?.gracePeriodMinutes ?? 30;
+    const [startHour, startMinute] = startTimeStr.split(":").map(Number);
+
+    const cutoffTotalMinutes = startHour * 60 + startMinute + graceMinutes;
+    const bdTimeStr = checkInDate.toLocaleTimeString("en-GB", { timeZone: "Asia/Dhaka", hour12: false });
+    const [curHour, curMinute] = bdTimeStr.split(":").map(Number);
+    const checkInMinutes = curHour * 60 + curMinute;
+
+    return checkInMinutes > cutoffTotalMinutes ? "LATE" : "PRESENT";
+  } catch {
+    return "PRESENT";
+  }
+}
 
 function createOutworkRouter(prisma) {
   const router = express.Router();
@@ -47,6 +95,8 @@ function createOutworkRouter(prisma) {
   });
 
   // POST /api/outwork (Employee applies for field visit / client visit)
+  // When employee applies for out of work, their attendance check-in is logged immediately
+  // with checkInTime = exact submission timestamp.
   router.post("/", async (req, res, next) => {
     try {
       const { visitDate, destination, purpose, latitude, longitude } = req.body || {};
@@ -56,7 +106,8 @@ function createOutworkRouter(prisma) {
         return res.status(400).json({ message: "Destination and purpose are required." });
       }
 
-      const dateObj = visitDate ? new Date(visitDate) : new Date();
+      const now = new Date();
+      const dateObj = visitDate ? new Date(visitDate) : now;
 
       const created = await prisma.outworkRequest.create({
         data: {
@@ -71,13 +122,76 @@ function createOutworkRouter(prisma) {
         },
       });
 
-      return res.status(201).json(created);
+      // =========================================================================
+      // IMMEDIATE ATTENDANCE CHECK-IN AT OUTWORK SUBMISSION TIME
+      // =========================================================================
+      let attendanceRecord = null;
+      try {
+        const attendanceDate = await getOrganizationAttendanceDate(prisma, organizationId, now);
+        const existingAttendance = await prisma.attendance.findUnique({
+          where: {
+            userId_date: {
+              userId: req.user.userId,
+              date: attendanceDate,
+            },
+          },
+        });
+
+        if (!existingAttendance) {
+          const ipAddress = resolveClientIp(req);
+          const shiftStatus = await calculateShiftStatus(prisma, organizationId, req.user.userId, now);
+
+          attendanceRecord = await prisma.attendance.create({
+            data: {
+              organizationId,
+              userId: req.user.userId,
+              date: attendanceDate,
+              checkInTime: now, // EXACT SUBMISSION TIMESTAMP
+              currentState: "CHECKED_IN",
+              status: shiftStatus,
+              ipAddress: ipAddress || "127.0.0.1",
+              punchInLatitude: latitude ? Number(latitude) : null,
+              punchInLongitude: longitude ? Number(longitude) : null,
+              punchInAddress: destination.trim(),
+              punchInDeviceType: "OUTWORK",
+            },
+          });
+        } else {
+          // If already checked in earlier, preserve their existing checkInTime
+          // If they were marked absent or hadn't checked in yet, activate their check-in with `now`
+          if (!existingAttendance.checkInTime || existingAttendance.status === "ABSENT") {
+            const shiftStatus = await calculateShiftStatus(prisma, organizationId, req.user.userId, now);
+            attendanceRecord = await prisma.attendance.update({
+              where: { id: existingAttendance.id },
+              data: {
+                checkInTime: now,
+                currentState: "CHECKED_IN",
+                status: shiftStatus,
+                punchInDeviceType: "OUTWORK",
+                punchInAddress: destination.trim(),
+              },
+            });
+          } else {
+            attendanceRecord = existingAttendance;
+          }
+        }
+      } catch (attErr) {
+        console.error("Outwork auto-checkin non-fatal error:", attErr);
+      }
+
+      return res.status(201).json({
+        ...created,
+        checkedIn: true,
+        checkInTime: attendanceRecord?.checkInTime || now,
+      });
     } catch (err) {
       next(err);
     }
   });
 
   // PATCH /api/outwork/:id/status (Admin/HR approves or rejects)
+  // When Admin/HR approves, the check-in time MUST strictly remain the original
+  // application submission timestamp (existing.createdAt), NOT the approval timestamp!
   router.patch("/:id/status", requireRoles("ADMIN", "HR"), async (req, res, next) => {
     try {
       const { id } = req.params;
@@ -100,6 +214,57 @@ function createOutworkRouter(prisma) {
           approvedBy: req.user.userId,
         },
       });
+
+      // =========================================================================
+      // PRESERVE ORIGINAL APPLICATION SUBMISSION TIME ON APPROVAL
+      // Never set checkInTime to current approval time!
+      // =========================================================================
+      if (status === "APPROVED" || !status) {
+        try {
+          const applyTime = existing.createdAt;
+          const attendanceDate = await getOrganizationAttendanceDate(prisma, organizationId, applyTime);
+
+          const existingAttendance = await prisma.attendance.findUnique({
+            where: {
+              userId_date: {
+                userId: existing.userId,
+                date: attendanceDate,
+              },
+            },
+          });
+
+          if (!existingAttendance) {
+            // Created with applyTime, NEVER approval time
+            await prisma.attendance.create({
+              data: {
+                organizationId,
+                userId: existing.userId,
+                date: attendanceDate,
+                checkInTime: applyTime, // STRICTLY THE ORIGINAL SUBMISSION TIME
+                currentState: "CHECKED_IN",
+                status: "PRESENT",
+                ipAddress: "127.0.0.1",
+                punchInLatitude: existing.latitude,
+                punchInLongitude: existing.longitude,
+                punchInAddress: existing.destination,
+                punchInDeviceType: "OUTWORK",
+              },
+            });
+          } else {
+            // Retain original checkInTime (or applyTime), ensure status is marked PRESENT upon approval
+            const finalCheckInTime = existingAttendance.checkInTime || applyTime;
+            await prisma.attendance.update({
+              where: { id: existingAttendance.id },
+              data: {
+                status: "PRESENT",
+                checkInTime: finalCheckInTime,
+              },
+            });
+          }
+        } catch (attErr) {
+          console.error("Outwork approval attendance sync error:", attErr);
+        }
+      }
 
       return res.status(200).json(updated);
     } catch (err) {
