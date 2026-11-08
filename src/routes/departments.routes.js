@@ -90,17 +90,18 @@ function createDepartmentsRouter(prisma) {
       const headedDeptIds = headedDepts.map((d) => d.id);
       const isDeptHead = headedDeptIds.length > 0;
 
+      const isMineOnly = req.query.mine === "true" || req.query.personal === "true";
+
       let whereClause = { organizationId };
 
-      if (isManager) {
+      if (isMineOnly) {
+        whereClause.userId = callerUserId;
+      } else if (isManager) {
         // Can filter by status if provided in query
       } else if (isDeptHead) {
         whereClause = {
           organizationId,
-          OR: [
-            { userId: callerUserId },
-            { user: { departmentId: { in: headedDeptIds } } },
-          ],
+          user: { departmentId: { in: headedDeptIds } },
         };
       } else {
         whereClause = {
