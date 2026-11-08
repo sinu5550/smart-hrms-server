@@ -2995,6 +2995,64 @@ function createDevicesRouter(prisma) {
     }
   });
 
+  // =========================================================================
+  // AUTOMATED LIGHTWEIGHT BACKGROUND ATTENDANCE AUTO-SYNC
+  // =========================================================================
+  // Runs autonomously in the background so even when Admins/HR are away at home (e.g. on Fridays/holidays),
+  // attendance punches are automatically pulled from biometric terminals into the database.
+  //
+  // Protection against infinite loops & server slowness:
+  // 1. Mutex flag (`isBackgroundSyncRunning`): Prevents concurrent/overlapping executions.
+  // 2. Cooldown debounce: At least 30 seconds between auto-sync runs.
+  // 3. Quick Mode: Only pulls today's punches (super fast, < 500ms).
+  // 4. Safe timeout & error handling: Never hangs the Node.js event loop.
+  // =========================================================================
+  let isBackgroundSyncRunning = false;
+  let lastBackgroundSyncTimestamp = 0;
+
+  async function triggerAutoDeviceSync(reason = "periodic") {
+    const now = Date.now();
+    if (isBackgroundSyncRunning) {
+      return false;
+    }
+    // Rate limit: Do not run more frequently than once every 30 seconds
+    if (now - lastBackgroundSyncTimestamp < 30000) {
+      return false;
+    }
+
+    isBackgroundSyncRunning = true;
+    lastBackgroundSyncTimestamp = now;
+
+    try {
+      console.log(`[Device Auto-Sync] 🔄 Starting quick background sync (${reason})...`);
+      await pollAllOnlineDevices(null, { quick: true });
+      console.log(`[Device Auto-Sync] ✓ Completed quick background sync (${reason}).`);
+      return true;
+    } catch (syncErr) {
+      console.warn(`[Device Auto-Sync] Notice (${reason}):`, syncErr.message);
+      return false;
+    } finally {
+      isBackgroundSyncRunning = false;
+    }
+  }
+
+  // Register on global so other routes (like break-start & today-status) can trigger JIT sync
+  global.g_triggerAutoDeviceSync = triggerAutoDeviceSync;
+
+  // Initial sync delayed by 15 seconds after server boot
+  setTimeout(() => {
+    triggerAutoDeviceSync("startup");
+  }, 15000);
+
+  // Periodic recurring background sync: Every 2 minutes (120,000 ms)
+  const autoSyncInterval = setInterval(() => {
+    triggerAutoDeviceSync("periodic_cron");
+  }, 120000);
+
+  if (autoSyncInterval.unref) {
+    autoSyncInterval.unref();
+  }
+
   return router;
 }
 

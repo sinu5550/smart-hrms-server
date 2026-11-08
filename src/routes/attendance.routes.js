@@ -140,7 +140,7 @@ function createAttendanceRouter(prisma) {
   router.get("/today-status", async (req, res, next) => {
     try {
       const today = await getOrganizationAttendanceDate(req.user.organizationId);
-      const attendance = await prisma.attendance.findUnique({
+      let attendance = await prisma.attendance.findUnique({
         where: { userId_date: { userId: req.user.userId, date: today } },
         include: {
           breaks: {
@@ -148,6 +148,19 @@ function createAttendanceRouter(prisma) {
           },
         },
       });
+
+      // If user is not yet marked checked in today, trigger a lightweight JIT auto-sync from device
+      if (!attendance && typeof global.g_triggerAutoDeviceSync === "function") {
+        await global.g_triggerAutoDeviceSync("today_status_jit");
+        attendance = await prisma.attendance.findUnique({
+          where: { userId_date: { userId: req.user.userId, date: today } },
+          include: {
+            breaks: {
+              orderBy: { startTime: "desc" },
+            },
+          },
+        });
+      }
 
       const user = await prisma.user.findUnique({
         where: { id: req.user.userId },
@@ -318,6 +331,16 @@ function createAttendanceRouter(prisma) {
         const dto = req.body || {};
         const today = await getOrganizationAttendanceDate(req.user.organizationId);
         const ipAddress = resolveClientIp(req);
+
+        // Pre-check: If employee punched at device but auto-sync hasn't run yet, run JIT sync
+        let preAttendance = await prisma.attendance.findUnique({
+          where: { userId_date: { userId: req.user.userId, date: today } },
+          select: { id: true },
+        });
+
+        if (!preAttendance && typeof global.g_triggerAutoDeviceSync === "function") {
+          await global.g_triggerAutoDeviceSync("break_start_jit");
+        }
 
         const result = await prisma.$transaction(async (tx) => {
           const attendance = await tx.attendance.findUnique({
