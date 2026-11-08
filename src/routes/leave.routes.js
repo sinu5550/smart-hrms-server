@@ -38,12 +38,44 @@ function createLeaveRouter(prisma) {
     }
   });
 
-  // GET /api/leave (Admin/HR sees all, Dept Head sees department, Employee sees own)
+  // GET /api/leave (Admin/HR/Owner sees all, Dept Head sees department, Employee sees own)
   router.get("/", async (req, res, next) => {
     try {
       const organizationId = req.user.organizationId;
       const callerUserId = req.user.userId;
-      const isManager = req.user.role === "ADMIN" || req.user.role === "HR";
+      const userRole = req.user.role;
+
+      const callerUser = await prisma.user.findUnique({
+        where: { id: callerUserId },
+        select: {
+          role: true,
+          isOwner: true,
+          permissions: true,
+          department: { select: { name: true } },
+        },
+      });
+
+      const permissions = Array.isArray(callerUser?.permissions) ? callerUser.permissions : [];
+      const isOwner = Boolean(
+        userRole === "OWNER" ||
+        userRole === "PLATFORM_ADMIN" ||
+        callerUser?.isOwner ||
+        req.user.isOwner
+      );
+      const isAdminOrHr = Boolean(
+        userRole === "ADMIN" ||
+        userRole === "HR" ||
+        callerUser?.role === "ADMIN" ||
+        callerUser?.role === "HR" ||
+        callerUser?.department?.name === "HR & Admin"
+      );
+      const hasLeavePerm = Boolean(
+        permissions.includes("attendance.view") ||
+        permissions.includes("attendance.manage") ||
+        permissions.includes("employees.view")
+      );
+
+      const isManager = isOwner || isAdminOrHr || hasLeavePerm;
 
       // Check if user is head of any departments
       const headedDepts = await prisma.department.findMany({
@@ -192,12 +224,44 @@ function createLeaveRouter(prisma) {
     }
   });
 
-  // PATCH /api/leave/:id/status (Admin/HR approves or rejects)
-  router.patch("/:id/status", requireRoles("ADMIN", "HR"), async (req, res, next) => {
+  // PATCH /api/leave/:id/status (Admin/HR/Owner directly approves or rejects)
+  router.patch("/:id/status", async (req, res, next) => {
     try {
       const { id } = req.params;
       const { status, rejectionNote } = req.body || {};
       const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+      const userRole = req.user.role;
+
+      const callerUser = await prisma.user.findUnique({
+        where: { id: callerUserId },
+        select: {
+          role: true,
+          isOwner: true,
+          permissions: true,
+          department: { select: { name: true } },
+        },
+      });
+
+      const permissions = Array.isArray(callerUser?.permissions) ? callerUser.permissions : [];
+      const isOwner = Boolean(
+        userRole === "OWNER" ||
+        userRole === "PLATFORM_ADMIN" ||
+        callerUser?.isOwner ||
+        req.user.isOwner
+      );
+      const isAdminOrHr = Boolean(
+        userRole === "ADMIN" ||
+        userRole === "HR" ||
+        callerUser?.role === "ADMIN" ||
+        callerUser?.role === "HR" ||
+        callerUser?.department?.name === "HR & Admin"
+      );
+      const canManage = isOwner || isAdminOrHr || permissions.includes("attendance.manage");
+
+      if (!canManage) {
+        return res.status(403).json({ message: "Only HR, Admin or Owner can sanction leave applications." });
+      }
 
       const existing = await prisma.leaveRequest.findFirst({
         where: { id, organizationId },
@@ -211,8 +275,9 @@ function createLeaveRouter(prisma) {
         where: { id },
         data: {
           status: status || "APPROVED",
+          deptHeadStatus: "APPROVED", // Automatically cleared upon Admin/HR action
           rejectionNote: rejectionNote || null,
-          actionedById: req.user.userId,
+          actionedById: callerUserId,
         },
       });
 

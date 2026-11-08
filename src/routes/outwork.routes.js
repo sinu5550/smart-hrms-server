@@ -53,15 +53,50 @@ function createOutworkRouter(prisma) {
   const router = express.Router();
   router.use(authenticateToken);
 
-  // GET /api/outwork (Admin/HR sees all in org, Employee sees own)
+  // GET /api/outwork (Admin/HR/Owner sees all in org, Employee sees own)
   router.get("/", async (req, res, next) => {
     try {
       const organizationId = req.user.organizationId;
-      const isManager = req.user.role === "ADMIN" || req.user.role === "HR";
+      const callerUserId = req.user.userId;
+      const userRole = req.user.role;
+
+      // Verify roles & permissions from database
+      const callerUser = await prisma.user.findUnique({
+        where: { id: callerUserId },
+        select: {
+          role: true,
+          isOwner: true,
+          permissions: true,
+          department: { select: { name: true } },
+        },
+      });
+
+      const permissions = Array.isArray(callerUser?.permissions) ? callerUser.permissions : [];
+      const isOwner = Boolean(
+        userRole === "OWNER" ||
+        userRole === "PLATFORM_ADMIN" ||
+        callerUser?.isOwner ||
+        req.user.isOwner
+      );
+      const isAdminOrHr = Boolean(
+        userRole === "ADMIN" ||
+        userRole === "HR" ||
+        callerUser?.role === "ADMIN" ||
+        callerUser?.role === "HR" ||
+        callerUser?.department?.name === "HR & Admin"
+      );
+      const hasOutworkPerm = Boolean(
+        permissions.includes("attendance.view") ||
+        permissions.includes("attendance.manage") ||
+        permissions.includes("reports.export") ||
+        permissions.includes("employees.view")
+      );
+
+      const isManager = isOwner || isAdminOrHr || hasOutworkPerm;
 
       const whereClause = isManager
         ? { organizationId }
-        : { organizationId, userId: req.user.userId };
+        : { organizationId, userId: callerUserId };
 
       const requests = await prisma.outworkRequest.findMany({
         where: whereClause,
@@ -189,14 +224,46 @@ function createOutworkRouter(prisma) {
     }
   });
 
-  // PATCH /api/outwork/:id/status (Admin/HR approves or rejects)
+  // PATCH /api/outwork/:id/status (Admin/HR/Owner approves or rejects)
   // When Admin/HR approves, the check-in time MUST strictly remain the original
   // application submission timestamp (existing.createdAt), NOT the approval timestamp!
-  router.patch("/:id/status", requireRoles("ADMIN", "HR"), async (req, res, next) => {
+  router.patch("/:id/status", async (req, res, next) => {
     try {
       const { id } = req.params;
       const { status, approvalNotes } = req.body || {};
       const organizationId = req.user.organizationId;
+      const callerUserId = req.user.userId;
+      const userRole = req.user.role;
+
+      const callerUser = await prisma.user.findUnique({
+        where: { id: callerUserId },
+        select: {
+          role: true,
+          isOwner: true,
+          permissions: true,
+          department: { select: { name: true } },
+        },
+      });
+
+      const permissions = Array.isArray(callerUser?.permissions) ? callerUser.permissions : [];
+      const isOwner = Boolean(
+        userRole === "OWNER" ||
+        userRole === "PLATFORM_ADMIN" ||
+        callerUser?.isOwner ||
+        req.user.isOwner
+      );
+      const isAdminOrHr = Boolean(
+        userRole === "ADMIN" ||
+        userRole === "HR" ||
+        callerUser?.role === "ADMIN" ||
+        callerUser?.role === "HR" ||
+        callerUser?.department?.name === "HR & Admin"
+      );
+      const canManage = isOwner || isAdminOrHr || permissions.includes("attendance.manage");
+
+      if (!canManage) {
+        return res.status(403).json({ message: "Only HR, Admin or Owner can sanction outwork applications." });
+      }
 
       const existing = await prisma.outworkRequest.findFirst({
         where: { id, organizationId },
