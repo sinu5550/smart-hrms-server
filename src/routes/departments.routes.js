@@ -6,17 +6,47 @@ function createDepartmentsRouter(prisma) {
 
   router.use(authenticateToken);
 
+  // Helper to get active personnel status codes (statuses with count_in_attendance = true)
+  async function getAttendanceCountStatusCodes(organizationId) {
+    let attendanceCountStatusCodes = ["ACTIVE", "ON_PROBATION"];
+    try {
+      const statusConfigs = await prisma.$queryRawUnsafe(
+        'SELECT code, count_in_attendance as "countInAttendance" FROM hrms.employment_status_configs WHERE organization_id = $1::uuid',
+        organizationId
+      );
+      if (Array.isArray(statusConfigs) && statusConfigs.length > 0) {
+        const eligible = statusConfigs.filter((s) => s.countInAttendance).map((s) => s.code);
+        if (eligible.length > 0) {
+          attendanceCountStatusCodes = eligible;
+        }
+      }
+    } catch (e) {
+      // Fallback to active and on probation
+    }
+    return attendanceCountStatusCodes;
+  }
+
   // GET /api/departments
   router.get("/", async (req, res, next) => {
     try {
+      const organizationId = req.user.organizationId;
+      const activeStatusCodes = await getAttendanceCountStatusCodes(organizationId);
+
       const departments = await prisma.department.findMany({
-        where: { organizationId: req.user.organizationId },
+        where: { organizationId },
         include: {
           headUser: {
             select: { id: true, fullName: true, employeeId: true, email: true, avatarUrl: true },
           },
           _count: {
-            select: { users: { where: { isDeleted: false } } },
+            select: {
+              users: {
+                where: {
+                  isDeleted: false,
+                  status: { in: activeStatusCodes },
+                },
+              },
+            },
           },
         },
         orderBy: { name: "asc" },
@@ -71,6 +101,8 @@ function createDepartmentsRouter(prisma) {
         return res.status(404).json({ message: "Department not found." });
       }
 
+      const activeStatusCodes = await getAttendanceCountStatusCodes(req.user.organizationId);
+
       const dept = await prisma.department.findFirst({
         where: { id: req.params.id, organizationId: req.user.organizationId },
         include: {
@@ -93,7 +125,16 @@ function createDepartmentsRouter(prisma) {
             },
             orderBy: { fullName: "asc" },
           },
-          _count: { select: { users: { where: { isDeleted: false } } } },
+          _count: {
+            select: {
+              users: {
+                where: {
+                  isDeleted: false,
+                  status: { in: activeStatusCodes },
+                },
+              },
+            },
+          },
         },
       });
       if (!dept) {
@@ -131,9 +172,21 @@ function createDepartmentsRouter(prisma) {
         return res.status(409).json({ message: `Department code "${code}" already exists.` });
       }
 
+      const activeStatusCodes = await getAttendanceCountStatusCodes(organizationId);
       const created = await prisma.department.create({
         data: { name, code, organizationId },
-        include: { _count: { select: { users: true } } },
+        include: {
+          _count: {
+            select: {
+              users: {
+                where: {
+                  isDeleted: false,
+                  status: { in: activeStatusCodes },
+                },
+              },
+            },
+          },
+        },
       });
 
       return res.status(201).json(created);
@@ -181,12 +234,22 @@ function createDepartmentsRouter(prisma) {
         data.headUserId = dto.headUserId ? dto.headUserId : null;
       }
 
+      const activeStatusCodes = await getAttendanceCountStatusCodes(organizationId);
       const updated = await prisma.department.update({
         where: { id },
         data,
         include: {
           headUser: { select: { id: true, fullName: true, employeeId: true, email: true, avatarUrl: true } },
-          _count: { select: { users: true } },
+          _count: {
+            select: {
+              users: {
+                where: {
+                  isDeleted: false,
+                  status: { in: activeStatusCodes },
+                },
+              },
+            },
+          },
         },
       });
 
