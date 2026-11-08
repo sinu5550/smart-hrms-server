@@ -58,14 +58,63 @@ function createDepartmentsRouter(prisma) {
   });
 
   // GET /api/departments/roster-shift-requests (Must be declared before /:id)
+  // Returns roster shift change requests:
+  // - Employee gets their own requests
+  // - Department Head gets requests for their department
+  // - Admin/HR/Owner/departments.manage gets all organization requests
   router.get("/roster-shift-requests", async (req, res, next) => {
     try {
       const organizationId = req.user.organizationId;
       const callerUserId = req.user.userId;
+      const userRole = req.user.role;
 
-      // Fetch pending requests for departments user is member or manager of
+      const callerUser = await prisma.user.findUnique({
+        where: { id: callerUserId },
+        select: { role: true, permissions: true },
+      });
+      const perms = Array.isArray(callerUser?.permissions) ? callerUser.permissions : [];
+      const isManager =
+        userRole === "OWNER" ||
+        userRole === "ADMIN" ||
+        userRole === "HR" ||
+        userRole === "PLATFORM_ADMIN" ||
+        req.user.isOwner ||
+        callerUser?.role === "ADMIN" ||
+        callerUser?.role === "HR" ||
+        perms.includes("departments.manage");
+
+      const headedDepts = await prisma.department.findMany({
+        where: { organizationId, headUserId: callerUserId },
+        select: { id: true },
+      });
+      const headedDeptIds = headedDepts.map((d) => d.id);
+      const isDeptHead = headedDeptIds.length > 0;
+
+      let whereClause = { organizationId };
+
+      if (isManager) {
+        // Can filter by status if provided in query
+      } else if (isDeptHead) {
+        whereClause = {
+          organizationId,
+          OR: [
+            { userId: callerUserId },
+            { user: { departmentId: { in: headedDeptIds } } },
+          ],
+        };
+      } else {
+        whereClause = {
+          organizationId,
+          userId: callerUserId,
+        };
+      }
+
+      if (req.query.status && req.query.status !== "ALL") {
+        whereClause.status = req.query.status;
+      }
+
       const requests = await prisma.rosterShiftRequest.findMany({
-        where: { organizationId },
+        where: whereClause,
         include: {
           user: {
             select: {
@@ -74,12 +123,14 @@ function createDepartmentsRouter(prisma) {
               employeeId: true,
               email: true,
               avatarUrl: true,
-              department: {
-                select: { id: true, name: true },
-              },
+              departmentId: true,
+              department: { select: { id: true, name: true, headUserId: true } },
+              shift: { select: { id: true, shiftName: true, startTime: true, endTime: true } },
             },
           },
-          targetShift: true,
+          targetShift: {
+            select: { id: true, shiftName: true, startTime: true, endTime: true },
+          },
         },
         orderBy: { createdAt: "desc" },
       });
@@ -394,76 +445,6 @@ function createDepartmentsRouter(prisma) {
   // ROSTER SHIFT CHANGE REQUESTS (EMPLOYEE & DEPT HEAD)
   // ==========================================
 
-  // GET /api/departments/roster-shift-requests
-  // Returns roster shift change requests:
-  // - Employee gets their own requests
-  // - Department Head gets requests for their department
-  // - Admin/HR gets all organization requests
-  router.get("/roster-shift-requests", async (req, res, next) => {
-    try {
-      const organizationId = req.user.organizationId;
-      const callerUserId = req.user.userId;
-      const userRole = req.user.role;
-      const isManager = userRole === "OWNER" || userRole === "ADMIN" || userRole === "HR" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
-
-      const headedDepts = await prisma.department.findMany({
-        where: { organizationId, headUserId: callerUserId },
-        select: { id: true },
-      });
-      const headedDeptIds = headedDepts.map((d) => d.id);
-      const isDeptHead = headedDeptIds.length > 0;
-
-      let whereClause = { organizationId };
-
-      if (isManager) {
-        // Can filter by status if provided in query
-      } else if (isDeptHead) {
-        whereClause = {
-          organizationId,
-          OR: [
-            { userId: callerUserId },
-            { user: { departmentId: { in: headedDeptIds } } },
-          ],
-        };
-      } else {
-        whereClause = {
-          organizationId,
-          userId: callerUserId,
-        };
-      }
-
-      if (req.query.status) {
-        whereClause.status = req.query.status;
-      }
-
-      const requests = await prisma.rosterShiftRequest.findMany({
-        where: whereClause,
-        include: {
-          user: {
-            select: {
-              id: true,
-              fullName: true,
-              employeeId: true,
-              email: true,
-              avatarUrl: true,
-              departmentId: true,
-              department: { select: { id: true, name: true, headUserId: true } },
-              shift: { select: { id: true, shiftName: true, startTime: true, endTime: true } },
-            },
-          },
-          targetShift: {
-            select: { id: true, shiftName: true, startTime: true, endTime: true },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-
-      return res.status(200).json(requests);
-    } catch (err) {
-      next(err);
-    }
-  });
-
   // POST /api/departments/roster-shift-requests
   // Allows an employee (specifically Roster employees) to submit a shift change request for next day / upcoming date
   router.post("/roster-shift-requests", async (req, res, next) => {
@@ -542,7 +523,21 @@ function createDepartmentsRouter(prisma) {
       const organizationId = req.user.organizationId;
       const callerUserId = req.user.userId;
       const userRole = req.user.role;
-      const isManager = userRole === "OWNER" || userRole === "ADMIN" || userRole === "HR" || userRole === "PLATFORM_ADMIN" || req.user.isOwner;
+
+      const callerUser = await prisma.user.findUnique({
+        where: { id: callerUserId },
+        select: { role: true, permissions: true },
+      });
+      const perms = Array.isArray(callerUser?.permissions) ? callerUser.permissions : [];
+      const isManager =
+        userRole === "OWNER" ||
+        userRole === "ADMIN" ||
+        userRole === "HR" ||
+        userRole === "PLATFORM_ADMIN" ||
+        req.user.isOwner ||
+        callerUser?.role === "ADMIN" ||
+        callerUser?.role === "HR" ||
+        perms.includes("departments.manage");
 
       const request = await prisma.rosterShiftRequest.findFirst({
         where: { id, organizationId },
