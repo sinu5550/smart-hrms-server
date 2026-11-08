@@ -2336,18 +2336,42 @@ function createDevicesRouter(prisma) {
         const path = "/ISAPI/AccessControl/AcsEvent?format=json";
 
         const now = new Date();
+        const bdToday = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka" }).format(now);
+        const bdYesterday = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka" }).format(
+          new Date(now.getTime() - 24 * 60 * 60 * 1000)
+        );
+
         let startTime, endTime;
 
         if (options.startDate && options.endDate) {
           startTime = `${options.startDate}T00:00:00`;
           endTime = `${options.endDate}T23:59:59`;
         } else if (options.quick !== false) {
-          // Default Quick Mode: Today and Yesterday (Super fast, 1-2 seconds!)
-          const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-          const startYMD = yesterday.toLocaleDateString("en-CA");
-          const endYMD = now.toLocaleDateString("en-CA");
-          startTime = `${startYMD}T00:00:00`;
-          endTime = `${endYMD}T23:59:59`;
+          // Quick Mode / Periodic Auto-sync:
+          // Check latest log in DB for this device to do incremental sync!
+          const latestDbLog = await prisma.biometricRawLog.findFirst({
+            where: { deviceSerialNumber: dev.deviceSerialNumber },
+            orderBy: { punchTime: "desc" },
+            select: { punchTime: true },
+          });
+
+          if (latestDbLog?.punchTime && (now.getTime() - latestDbLog.punchTime.getTime() < 36 * 3600 * 1000)) {
+            // Look back 2 hours from latest DB log to safely cover any clock drift or overlap
+            const lookback = new Date(latestDbLog.punchTime.getTime() - 2 * 3600 * 1000);
+            const lDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka" }).format(lookback);
+            const lTime = new Intl.DateTimeFormat("en-GB", {
+              timeZone: "Asia/Dhaka",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: false,
+            }).format(lookback);
+            startTime = `${lDate}T${lTime}`;
+          } else {
+            // Default to today 00:00:00
+            startTime = `${bdToday}T00:00:00`;
+          }
+          endTime = `${bdToday}T23:59:59`;
         } else {
           // Full/Historical catch-up
           const latestDbLog = await prisma.biometricRawLog.findFirst({
@@ -2361,15 +2385,15 @@ function createDevicesRouter(prisma) {
             ? new Date(Math.max(oneYearAgo.getTime(), latestDbLog.punchTime.getTime() - 24 * 60 * 60 * 1000))
             : oneYearAgo;
 
-          const startYMD = syncStartDate.toLocaleDateString("en-CA");
-          const endYMD = now.toLocaleDateString("en-CA");
+          const startYMD = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka" }).format(syncStartDate);
           startTime = `${startYMD}T00:00:00`;
-          endTime = `${endYMD}T23:59:59`;
+          endTime = `${bdToday}T23:59:59`;
         }
 
         let eventsList = [];
         let pos = 0;
-        const maxBatches = options.quick !== false ? 5 : 50;
+        // 25 batches * 30 results = 750 events max (breaks as soon as pos >= totalMatches)
+        const maxBatches = options.quick !== false ? 25 : 100;
         let batchCount = 0;
 
         // Helper to query device events via ISUP Gateway or direct network
@@ -2535,8 +2559,26 @@ function createDevicesRouter(prisma) {
           else if (ev.minor === 38) verificationMode = "FINGERPRINT";
           else if (ev.minor === 1) verificationMode = "CARD";
           
-          const userRec = findUser(ev.employeeNoString);
+          const userRec = findUser(ev.employeeNoString, ev.name);
           if (!userRec) continue;
+
+          const dayUtcMidnight = await resolveAttendanceLedgerDate(dev.organizationId, punchDate);
+
+          const existingAtt = await prisma.attendance.findUnique({
+            where: {
+              userId_date: {
+                userId: userRec.id,
+                date: dayUtcMidnight,
+              },
+            },
+          });
+
+          const isCheckoutPunch = Boolean(
+            verificationMode === "FINGERPRINT" &&
+            existingAtt?.checkInTime &&
+            !existingAtt?.checkOutTime &&
+            punchDate.getTime() > existingAtt.checkInTime.getTime() + 60000
+          );
 
           const existingLog = await prisma.biometricRawLog.findFirst({
             where: {
@@ -2557,24 +2599,13 @@ function createDevicesRouter(prisma) {
                 deviceSerialNumber: dev.deviceSerialNumber,
                 employeeId: userRec.employeeId,
                 punchTime: punchDate,
-                punchType: "CHECK_IN",
+                punchType: isCheckoutPunch ? "CHECK_OUT" : "CHECK_IN",
                 verificationMode,
                 syncStatus: "PROCESSED",
               },
             });
             newRawCount++;
           }
-
-          const dayUtcMidnight = await resolveAttendanceLedgerDate(dev.organizationId, punchDate);
-
-          const existingAtt = await prisma.attendance.findUnique({
-            where: {
-              userId_date: {
-                userId: userRec.id,
-                date: dayUtcMidnight,
-              },
-            },
-          });
 
           if (!existingAtt) {
             const attStatus = await determineAttendanceStatus(dev.organizationId, userRec.id, punchDate);
@@ -2588,15 +2619,22 @@ function createDevicesRouter(prisma) {
                 status: attStatus,
                 ipAddress: dev.ipAddress,
                 punchInDeviceType: "BIOMETRIC_TERMINAL",
-                punchInAddress: dev.locationName,
+                punchInAddress: dev.locationName || "Main Gate",
               },
             });
-          } else if (
-            verificationMode === "FINGERPRINT" &&
-            existingAtt.checkInTime &&
-            !existingAtt.checkOutTime &&
-            punchDate.getTime() > existingAtt.checkInTime.getTime() + 60000
-          ) {
+            console.log(`[Pull Attendance] ✓ Processed Check-In for ${userRec.fullName} (${userRec.employeeId}) at ${punchDate.toISOString()}`);
+          } else if (isCheckoutPunch) {
+            // Close any open break if user checked out while on break
+            await prisma.attendanceBreak.updateMany({
+              where: {
+                attendanceId: existingAtt.id,
+                endTime: null,
+              },
+              data: {
+                endTime: punchDate,
+              },
+            });
+
             // Fingerprint punch marks Check-Out! Once checked out, never overwrite checkOutTime!
             const elapsedMinutes = Math.max(
               0,
@@ -2613,9 +2651,10 @@ function createDevicesRouter(prisma) {
                 currentState: "CHECKED_OUT",
                 totalWorkMinutes,
                 overtimeMinutes,
-                punchOutAddress: dev.locationName,
+                punchOutAddress: dev.locationName || "Main Gate",
               },
             });
+            console.log(`[Pull Attendance] ✓ Processed Check-Out for ${userRec.fullName} (${userRec.employeeId}) at ${punchDate.toISOString()} (Work: ${totalWorkMinutes}m)`);
           }
         }
 

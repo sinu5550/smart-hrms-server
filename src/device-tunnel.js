@@ -14,15 +14,15 @@ const activeTunnels = new Map();
 const pendingRequests = new Map();
 
 // Dynamic working ISUP host resolution
-let g_workingIsupHost = process.env.ISUP_GATEWAY_HOST || "hikvision-gateway-uoyomo";
+let g_workingIsupHost = process.env.ISUP_GATEWAY_HOST || "2.24.171.175";
 const ISUP_CANDIDATE_HOSTS = [
   process.env.ISUP_GATEWAY_HOST,
-  "hikvision-gateway-uoyomo",
-  "hikvision-gateway",
-  "172.17.0.1",
-  "host.docker.internal",
   "2.24.171.175",
   "127.0.0.1",
+  "172.17.0.1",
+  "hikvision-gateway-uoyomo",
+  "hikvision-gateway",
+  "host.docker.internal",
 ].filter(Boolean);
 
 // Helper to send ISAPI via the native Linux ISUP Gateway service
