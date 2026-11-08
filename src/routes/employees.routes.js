@@ -1246,6 +1246,32 @@ function createEmployeesRouter(prisma) {
       const { confirmationText } = req.body || {};
       const organizationId = req.user.organizationId;
 
+      // Check caller's permission: Must be Owner or have "employees.delete"
+      const caller = await prisma.user.findUnique({
+        where: { id: req.user.userId },
+        select: {
+          role: true,
+          permissions: true,
+          customRole: { select: { permissions: true } },
+          organization: { select: { ownerEmail: true } },
+        },
+      });
+
+      const isCallerOwner = Boolean(
+        caller?.role === "OWNER" ||
+        (caller?.organization?.ownerEmail && req.user.email?.toLowerCase() === caller.organization.ownerEmail.toLowerCase())
+      );
+
+      const directPerms = Array.isArray(caller?.permissions) ? caller.permissions : [];
+      const rolePerms = Array.isArray(caller?.customRole?.permissions) ? caller.customRole.permissions : [];
+      const callerPerms = Array.from(new Set([...directPerms, ...rolePerms]));
+
+      if (!isCallerOwner && !callerPerms.includes("employees.delete")) {
+        return res.status(403).json({
+          message: "Access denied: You do not possess the 'employees.delete' privilege to delete employee records.",
+        });
+      }
+
       const user = await prisma.user.findFirst({ where: { id, organizationId } });
       if (!user || user.isDeleted) {
         return res.status(404).json({
@@ -1427,6 +1453,32 @@ function createEmployeesRouter(prisma) {
     try {
       const { ids } = req.body || {};
       const organizationId = req.user.organizationId;
+
+      // Check caller's permission: Must be Owner or have "employees.delete"
+      const caller = await prisma.user.findUnique({
+        where: { id: req.user.userId },
+        select: {
+          role: true,
+          permissions: true,
+          customRole: { select: { permissions: true } },
+          organization: { select: { ownerEmail: true } },
+        },
+      });
+
+      const isCallerOwner = Boolean(
+        caller?.role === "OWNER" ||
+        (caller?.organization?.ownerEmail && req.user.email?.toLowerCase() === caller.organization.ownerEmail.toLowerCase())
+      );
+
+      const directPerms = Array.isArray(caller?.permissions) ? caller.permissions : [];
+      const rolePerms = Array.isArray(caller?.customRole?.permissions) ? caller.customRole.permissions : [];
+      const callerPerms = Array.from(new Set([...directPerms, ...rolePerms]));
+
+      if (!isCallerOwner && !callerPerms.includes("employees.delete")) {
+        return res.status(403).json({
+          message: "Access denied: You do not possess the 'employees.delete' privilege to perform bulk deletion.",
+        });
+      }
 
       if (!Array.isArray(ids) || ids.length === 0) {
         return res.status(400).json({ message: "No employee IDs provided for deletion." });
