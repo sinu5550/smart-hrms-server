@@ -9,7 +9,12 @@ function createLoansRouter(prisma) {
   router.get("/", async (req, res, next) => {
     try {
       const organizationId = req.user.organizationId;
-      const isManager = req.user.role === "ADMIN" || req.user.role === "HR";
+      const isManager =
+        req.user.role === "ADMIN" ||
+        req.user.role === "HR" ||
+        req.user.role === "OWNER" ||
+        req.user.role === "PLATFORM_ADMIN" ||
+        req.user.isOwner;
 
       const whereClause = isManager
         ? { organizationId }
@@ -81,8 +86,8 @@ function createLoansRouter(prisma) {
     }
   });
 
-  // PATCH /api/loans/:id/status (Admin/HR approves/rejects)
-  router.patch("/:id/status", requireRoles("ADMIN", "HR"), async (req, res, next) => {
+  // PATCH /api/loans/:id/status (Admin/HR/Owner approves/rejects)
+  router.patch("/:id/status", requireRoles("ADMIN", "HR", "OWNER", "PLATFORM_ADMIN"), async (req, res, next) => {
     try {
       const { id } = req.params;
       const { status } = req.body || {};
