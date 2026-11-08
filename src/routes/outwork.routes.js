@@ -65,9 +65,10 @@ function createOutworkRouter(prisma) {
         where: { id: callerUserId },
         select: {
           role: true,
-          isOwner: true,
+          email: true,
           permissions: true,
           department: { select: { name: true } },
+          organization: { select: { ownerEmail: true } },
         },
       });
 
@@ -75,7 +76,8 @@ function createOutworkRouter(prisma) {
       const isOwner = Boolean(
         userRole === "OWNER" ||
         userRole === "PLATFORM_ADMIN" ||
-        callerUser?.isOwner ||
+        callerUser?.role === "OWNER" ||
+        (callerUser?.organization?.ownerEmail && callerUser?.email?.toLowerCase() === callerUser?.organization?.ownerEmail?.toLowerCase()) ||
         req.user.isOwner
       );
       const isAdminOrHr = Boolean(
@@ -111,6 +113,7 @@ function createOutworkRouter(prisma) {
               id: true,
               fullName: true,
               employeeId: true,
+              email: true,
               avatarUrl: true,
               department: { select: { name: true } },
             },
@@ -239,9 +242,10 @@ function createOutworkRouter(prisma) {
         where: { id: callerUserId },
         select: {
           role: true,
-          isOwner: true,
+          email: true,
           permissions: true,
           department: { select: { name: true } },
+          organization: { select: { ownerEmail: true } },
         },
       });
 
@@ -249,7 +253,8 @@ function createOutworkRouter(prisma) {
       const isOwner = Boolean(
         userRole === "OWNER" ||
         userRole === "PLATFORM_ADMIN" ||
-        callerUser?.isOwner ||
+        callerUser?.role === "OWNER" ||
+        (callerUser?.organization?.ownerEmail && callerUser?.email?.toLowerCase() === callerUser?.organization?.ownerEmail?.toLowerCase()) ||
         req.user.isOwner
       );
       const isAdminOrHr = Boolean(
