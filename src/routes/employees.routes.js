@@ -450,13 +450,15 @@ function createEmployeesRouter(prisma) {
         },
       });
 
-      // 4. Running Month Birthdays (all non-deleted employees of organization)
+      // 4. Running Month Birthdays (only tick-marked attendance-eligible employees)
       const allActiveOrgEmployees = await prisma.user.findMany({
         where: {
           organizationId,
           isDeleted: false,
           dateOfBirth: { not: null },
-          status: { notIn: ["RESIGNED", "TERMINATED"] },
+          status: { in: attendanceCountStatusCodes },
+          attendanceExempt: false,
+          ...(ownerEmail ? { email: { not: ownerEmail } } : {}),
         },
         select: {
           id: true,
