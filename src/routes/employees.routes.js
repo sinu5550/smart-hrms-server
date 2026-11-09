@@ -706,7 +706,12 @@ function createEmployeesRouter(prisma) {
           customRole: { select: { id: true, name: true, permissions: true } },
           createdAt: true,
         },
-        orderBy: { createdAt: "desc" },
+        orderBy: { employeeId: "asc" },
+      });
+
+      // Sort natural ascending by employeeId (e.g. EKH-26-0001, 0002, ... 0020, 0021)
+      employees.sort((a, b) => {
+        return (a.employeeId || "").localeCompare(b.employeeId || "", undefined, { numeric: true, sensitivity: "base" });
       });
 
       const result = employees.map((emp) => ({
