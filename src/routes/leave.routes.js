@@ -149,7 +149,19 @@ function createLeaveRouter(prisma) {
         return res.status(400).json({ message: "Invalid leave type." });
       }
 
-      const days = Number(totalDays) || 1;
+      let days = Number(totalDays);
+      const s = new Date(startDate);
+      const e = new Date(endDate);
+      const diffDays = Math.round((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+
+      if (!days || isNaN(days) || days <= 0) {
+        days = diffDays > 0 ? diffDays : 1;
+      } else if (leaveTypeName !== "SHORT_LEAVE") {
+        // Automatically sync inclusive day count for multi-day leaves (e.g. 11 Nov to 12 Nov = 2 Days)
+        if (diffDays > 0 && diffDays > days) {
+          days = diffDays;
+        }
+      }
 
       const created = await prisma.leaveRequest.create({
         data: {
