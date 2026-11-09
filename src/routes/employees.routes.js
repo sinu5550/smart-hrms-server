@@ -533,10 +533,16 @@ function createEmployeesRouter(prisma) {
         const isRosterEmp = Boolean(orgHasRoster && emp.departmentId && rosterDeptIds.includes(emp.departmentId));
         const empRosterOffDays = Array.isArray(emp.rosterOffDays) ? emp.rosterOffDays : [];
 
+        // Check if employee is on approved leave today
+        const leaveItem = leavesToday.find((l) => l.userId === emp.id);
+
         let isOff = false;
         let offType = "Day Off";
 
-        if (holidayTitle) {
+        if (leaveItem) {
+          isOff = true;
+          offType = `On Leave (${leaveItem.leaveType?.name || "Leave"})`;
+        } else if (holidayTitle) {
           isOff = true;
           offType = holidayTitle;
         } else if (isRosterEmp) {

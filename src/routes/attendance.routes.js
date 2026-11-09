@@ -1150,12 +1150,6 @@ function createAttendanceRouter(prisma) {
         for (const cal of calendarDates) {
           const isHoliday = holidayDateStrs.has(cal.dateStr);
           const isWeekend = isDayInList(effectiveOffDays, cal.dayName);
-          const isOffDay = isWeekend || isHoliday;
-
-          // If day is a designated off-day or official holiday, don't count towards office days
-          if (!isOffDay) {
-            officeDays++;
-          }
 
           // Check if employee had approved leave on this date
           const calTime = new Date(cal.dateStr).getTime();
@@ -1165,6 +1159,13 @@ function createAttendanceRouter(prisma) {
             const lEnd = new Date(l.endDate).getTime();
             return calTime >= lStart && calTime <= lEnd;
           });
+
+          // Designated off-day, holiday, or approved leave date: employee is authorized off, so don't count towards office days
+          const isOffDay = isWeekend || isHoliday || hasLeave;
+
+          if (!isOffDay) {
+            officeDays++;
+          }
 
           const attRecord = userAtts.get(cal.dateStr);
 
