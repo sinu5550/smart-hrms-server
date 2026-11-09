@@ -661,6 +661,275 @@ function createAttendanceRouter(prisma) {
     }
   });
 
+  // GET /api/attendance/admin/individual-report
+  // Generates complete single-employee attendance breakdown with daily history, stats, and metadata
+  router.get("/admin/individual-report", requireRoles("HR", "ADMIN"), async (req, res, next) => {
+    try {
+      const { userId, month, startDate: qStartDate, endDate: qEndDate } = req.query;
+      const organizationId = req.user.organizationId;
+
+      if (!userId) {
+        return res.status(400).json({ message: "userId query parameter is required." });
+      }
+
+      const user = await prisma.user.findFirst({
+        where: { id: userId, organizationId, isDeleted: false },
+        select: {
+          id: true,
+          employeeId: true,
+          fullName: true,
+          email: true,
+          avatarUrl: true,
+          rosterOffDays: true,
+          department: { select: { id: true, name: true } },
+          designation: { select: { id: true, name: true } },
+          shift: { select: { id: true, shiftName: true, startTime: true, endTime: true, gracePeriodMinutes: true } },
+          branch: { select: { id: true, name: true } },
+        },
+      });
+
+      if (!user) {
+        return res.status(404).json({ message: "Employee not found." });
+      }
+
+      const org = await prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { name: true, logoUrl: true, weekendDays: true, hasRosterDuty: true, rosterDepartmentIds: true },
+      });
+
+      // Default shift fallback
+      const defaultShift = await prisma.officeSetting.findFirst({
+        where: { organizationId, isDefault: true },
+      }) || await prisma.officeSetting.findFirst({ where: { organizationId } });
+
+      const empShift = user.shift || defaultShift;
+
+      // Determine date range: either from month (YYYY-MM) or startDate/endDate or default to current month
+      const now = new Date();
+      const currentMonthStr = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka" }).format(now).slice(0, 7);
+      const targetMonth = month || (qStartDate ? qStartDate.slice(0, 7) : currentMonthStr);
+
+      let startDate = qStartDate;
+      let endDate = qEndDate;
+
+      if (!startDate || !endDate) {
+        const [y, m] = targetMonth.split("-").map(Number);
+        startDate = `${targetMonth}-01`;
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        endDate = `${targetMonth}-${String(lastDay).padStart(2, "0")}`;
+      }
+
+      const [sY, sM, sD] = startDate.split("-").map(Number);
+      const [eY, eM, eD] = endDate.split("-").map(Number);
+      const startUtc = new Date(Date.UTC(sY, sM - 1, sD, 0, 0, 0, 0));
+      const endUtc = new Date(Date.UTC(eY, eM - 1, eD, 23, 59, 59, 999));
+
+      // Fetch attendances in range
+      const attendances = await prisma.attendance.findMany({
+        where: {
+          userId: user.id,
+          organizationId,
+          date: { gte: startUtc, lte: endUtc },
+        },
+        include: {
+          breaks: { orderBy: { startTime: "asc" } },
+        },
+        orderBy: { date: "asc" },
+      });
+
+      const attMap = new Map();
+      attendances.forEach((a) => {
+        const dStr = new Date(a.date).toISOString().split("T")[0];
+        attMap.set(dStr, a);
+      });
+
+      // Fetch approved leaves in range
+      const leaves = await prisma.leaveRequest.findMany({
+        where: {
+          userId: user.id,
+          organizationId,
+          status: "APPROVED",
+          startDate: { lte: endUtc },
+          endDate: { gte: startUtc },
+        },
+        select: { startDate: true, endDate: true, reason: true },
+      });
+
+      // Fetch official holidays in range
+      const holidays = await prisma.holiday.findMany({
+        where: {
+          organizationId,
+          fromDate: { lte: endUtc },
+          toDate: { gte: startUtc },
+        },
+        select: { fromDate: true, toDate: true, title: true },
+      });
+
+      const holidayDateStrs = new Map();
+      holidays.forEach((h) => {
+        const hStart = new Date(h.fromDate);
+        const hEnd = new Date(h.toDate);
+        for (let d = new Date(hStart); d <= hEnd; d.setUTCDate(d.getUTCDate() + 1)) {
+          holidayDateStrs.set(d.toISOString().split("T")[0], h.title);
+        }
+      });
+
+      const normalizeDay = (d) => String(d || "").trim().toLowerCase();
+      const isDayInList = (list, targetDay) => {
+        if (!Array.isArray(list) || list.length === 0) return false;
+        const targetNorm = normalizeDay(targetDay);
+        const targetShort = targetNorm.slice(0, 3);
+        return list.some((item) => {
+          const itemNorm = normalizeDay(item);
+          return itemNorm === targetNorm || itemNorm === targetShort || itemNorm.slice(0, 3) === targetShort;
+        });
+      };
+
+      const formatTime12h = (dateObj) => {
+        if (!dateObj) return "—";
+        const d = new Date(dateObj);
+        if (isNaN(d.getTime())) return "—";
+        return new Intl.DateTimeFormat("en-US", {
+          timeZone: "Asia/Dhaka",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        }).format(d);
+      };
+
+      const empCustomOffDays = Array.isArray(user.rosterOffDays) && user.rosterOffDays.length > 0 ? user.rosterOffDays : null;
+      const orgWeekends = Array.isArray(org?.weekendDays) && org.weekendDays.length > 0 ? org.weekendDays : ["Friday"];
+      const effectiveOffDays = empCustomOffDays || orgWeekends;
+
+      const nowBdStr = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka" }).format(new Date());
+
+      const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const fullMonthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+      let presentCount = 0;
+      let absentCount = 0;
+      let lateCount = 0;
+      let leaveCount = 0;
+      let offDayCount = 0;
+      let holidayCount = 0;
+      let totalWorkMinutes = 0;
+      let totalOvertimeMinutes = 0;
+
+      const dailyHistory = [];
+
+      for (let d = new Date(Date.UTC(sY, sM - 1, sD)); d <= new Date(Date.UTC(eY, eM - 1, eD)); d.setUTCDate(d.getUTCDate() + 1)) {
+        const dateStr = d.toISOString().split("T")[0];
+        const dayName = dayNames[d.getUTCDay()];
+        const isHoliday = holidayDateStrs.has(dateStr);
+        const isWeekend = isDayInList(effectiveOffDays, dayName);
+        const att = attMap.get(dateStr);
+        const isFuture = dateStr > nowBdStr;
+
+        const calTime = new Date(dateStr).getTime();
+        const hasLeave = leaves.some((l) => {
+          const lStart = new Date(l.startDate).getTime();
+          const lEnd = new Date(l.endDate).getTime();
+          return calTime >= lStart && calTime <= lEnd;
+        });
+
+        const [dy, dm, dd] = dateStr.split("-").map(Number);
+        const dateFormatted = `${monthNames[dm - 1]} ${String(dd).padStart(2, "0")}`;
+
+        let status = "Absent";
+        let checkIn = "—";
+        let checkOut = "—";
+        let workMins = 0;
+        let otMins = 0;
+
+        if (hasLeave) {
+          status = "Leave";
+          leaveCount++;
+        } else if (att) {
+          status = att.status === "LATE" ? "Late" : "Present";
+          if (status === "Late") lateCount++;
+          presentCount++;
+          checkIn = formatTime12h(att.checkInTime);
+          checkOut = formatTime12h(att.checkOutTime);
+          workMins = att.totalWorkMinutes || 0;
+          otMins = att.overtimeMinutes || 0;
+          totalWorkMinutes += workMins;
+          totalOvertimeMinutes += otMins;
+        } else if (isHoliday) {
+          status = "Holiday";
+          holidayCount++;
+        } else if (isWeekend) {
+          status = "Off-Day";
+          offDayCount++;
+        } else if (isFuture) {
+          status = "Upcoming";
+        } else {
+          status = "Absent";
+          absentCount++;
+        }
+
+        dailyHistory.push({
+          date: dateStr,
+          dateFormatted,
+          dayName,
+          checkIn,
+          checkOut,
+          status,
+          workMinutes: workMins,
+          workHoursFormatted: workMins > 0 ? `${Math.floor(workMins / 60)}h ${workMins % 60}m` : "—",
+          overtimeMinutes: otMins,
+          holidayName: holidayDateStrs.get(dateStr) || null,
+        });
+      }
+
+      const [mY, mM] = targetMonth.split("-").map(Number);
+      const monthLabel = `${fullMonthNames[mM - 1]} ${mY}`;
+
+      const totalHours = Math.floor(totalWorkMinutes / 60);
+      const totalHoursFormatted = totalHours > 0 ? `${totalHours}h` : `${totalWorkMinutes}m`;
+
+      return res.status(200).json({
+        success: true,
+        employee: {
+          id: user.id,
+          fullName: user.fullName,
+          employeeId: user.employeeId,
+          email: user.email,
+          avatarUrl: user.avatarUrl,
+          department: user.department?.name || "General",
+          designation: user.designation?.name || "Staff",
+          branch: user.branch?.name || "Head Office",
+          shift: empShift ? {
+            name: empShift.shiftName,
+            startTime: empShift.startTime,
+            endTime: empShift.endTime,
+          } : null,
+          offDays: effectiveOffDays,
+        },
+        period: {
+          startDate,
+          endDate,
+          month: targetMonth,
+          monthLabel,
+        },
+        stats: {
+          presentDays: presentCount,
+          absentDays: absentCount,
+          lateDays: lateCount,
+          leaveDays: leaveCount,
+          offDays: offDayCount,
+          holidays: holidayCount,
+          totalWorkHours: totalHoursFormatted,
+          totalWorkMinutes,
+          totalOvertimeMinutes,
+        },
+        dailyHistory,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // GET /api/attendance/admin/summary-report
   // Generates per-employee aggregated summary for date range (as in user requirement)
   router.get("/admin/summary-report", requireRoles("HR", "ADMIN"), async (req, res, next) => {
