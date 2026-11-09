@@ -772,6 +772,24 @@ function createAttendanceRouter(prisma) {
         },
       });
 
+      // 4.1 Fetch official holidays in range
+      const holidays = await prisma.holiday.findMany({
+        where: {
+          organizationId,
+          date: {
+            gte: startUtc,
+            lte: endUtc,
+          },
+        },
+        select: {
+          date: true,
+          name: true,
+        },
+      });
+      const holidayDateStrs = new Set(
+        holidays.map((h) => new Date(h.date).toISOString().split("T")[0])
+      );
+
       // Group attendances by userId -> date string (YYYY-MM-DD)
       const userAttMap = new Map();
       attendances.forEach((att) => {
@@ -789,9 +807,31 @@ function createAttendanceRouter(prisma) {
         return `${isNegative ? "-" : ""}${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
       };
 
+      // Helper to match day names case-insensitively and handle short/full names (e.g. "Sat" vs "Saturday")
+      const normalizeDay = (d) => String(d || "").trim().toLowerCase();
+      const isDayInList = (list, targetDay) => {
+        if (!Array.isArray(list) || list.length === 0) return false;
+        const targetNorm = normalizeDay(targetDay);
+        const targetShort = targetNorm.slice(0, 3);
+        return list.some((item) => {
+          const itemNorm = normalizeDay(item);
+          return itemNorm === targetNorm || itemNorm === targetShort || itemNorm.slice(0, 3) === targetShort;
+        });
+      };
+
       // 5. Aggregate summary per employee
       const summaryRows = employees.map((emp, index) => {
         const isRosterEmp = hasRoster && emp.departmentId && rosterDeptIds.includes(emp.departmentId);
+        const empCustomOffDays = Array.isArray(emp.rosterOffDays) && emp.rosterOffDays.length > 0
+          ? emp.rosterOffDays
+          : null;
+        const orgWeekends = Array.isArray(orgWeekendDays) && orgWeekendDays.length > 0
+          ? orgWeekendDays
+          : ["Friday"];
+
+        // Effective off-days: If employee has custom designated off-days assigned, always respect them; otherwise fallback to organization weekends
+        const effectiveOffDays = empCustomOffDays || orgWeekends;
+
         const userAtts = userAttMap.get(emp.id) || new Map();
 
         // Calculate expected daily duty hours from shift
@@ -824,11 +864,12 @@ function createAttendanceRouter(prisma) {
 
         // Check each calendar day
         for (const cal of calendarDates) {
-          const empRosterOffDays = Array.isArray(emp.rosterOffDays) ? emp.rosterOffDays : [];
-          const isWeekend = isRosterEmp ? empRosterOffDays.includes(cal.dayName) : orgWeekendDays.includes(cal.dayName);
+          const isHoliday = holidayDateStrs.has(cal.dateStr);
+          const isWeekend = isDayInList(effectiveOffDays, cal.dayName);
+          const isOffDay = isWeekend || isHoliday;
 
-          // If day is a weekend for standard employee, don't count towards standard working office days unless they worked
-          if (!isWeekend) {
+          // If day is a designated off-day or official holiday, don't count towards office days
+          if (!isOffDay) {
             officeDays++;
           }
 
@@ -876,8 +917,8 @@ function createAttendanceRouter(prisma) {
               }
             }
           } else {
-            // Not on leave, no attendance record
-            if (!isWeekend) {
+            // Not on leave, no attendance record: only mark absent on mandatory working office days
+            if (!isOffDay) {
               absentCount++;
             }
           }
