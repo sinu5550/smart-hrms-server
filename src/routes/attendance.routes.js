@@ -579,7 +579,8 @@ function createAttendanceRouter(prisma) {
               fullName: true,
               email: true,
               avatarUrl: true,
-              department: { select: { name: true } },
+              department: { select: { id: true, name: true } },
+              designation: { select: { id: true, name: true } },
             },
           },
           breaks: {
