@@ -875,6 +875,17 @@ function createAttendanceRouter(prisma) {
           checkIn,
           checkOut,
           status,
+          currentState: att?.currentState || (att ? "CHECKED_OUT" : "NOT_CHECKED_IN"),
+          totalBreakMinutes: att?.totalBreakMinutes || 0,
+          breaks: att?.breaks
+            ? att.breaks.map((b) => ({
+                id: b.id,
+                breakType: b.breakType,
+                startTime: formatTime12h(b.startTime),
+                endTime: formatTime12h(b.endTime),
+                durationMinutes: b.durationMinutes || 0,
+              }))
+            : [],
           workMinutes: workMins,
           workHoursFormatted: workMins > 0 ? `${Math.floor(workMins / 60)}h ${workMins % 60}m` : "—",
           overtimeMinutes: otMins,
