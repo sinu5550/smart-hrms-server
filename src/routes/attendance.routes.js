@@ -776,19 +776,23 @@ function createAttendanceRouter(prisma) {
       const holidays = await prisma.holiday.findMany({
         where: {
           organizationId,
-          date: {
-            gte: startUtc,
-            lte: endUtc,
-          },
+          fromDate: { lte: endUtc },
+          toDate: { gte: startUtc },
         },
         select: {
-          date: true,
-          name: true,
+          fromDate: true,
+          toDate: true,
+          title: true,
         },
       });
-      const holidayDateStrs = new Set(
-        holidays.map((h) => new Date(h.date).toISOString().split("T")[0])
-      );
+      const holidayDateStrs = new Set();
+      holidays.forEach((h) => {
+        const hStart = new Date(h.fromDate);
+        const hEnd = new Date(h.toDate);
+        for (let d = new Date(hStart); d <= hEnd; d.setUTCDate(d.getUTCDate() + 1)) {
+          holidayDateStrs.add(d.toISOString().split("T")[0]);
+        }
+      });
 
       // Group attendances by userId -> date string (YYYY-MM-DD)
       const userAttMap = new Map();
