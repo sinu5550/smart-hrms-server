@@ -255,52 +255,67 @@ std::string execute_isapi(LONG userId, const std::string& method, const std::str
         }
         ret = NET_ECMS_PutPTXMLConfig(userId, &ptParam);
     } else if (method == "POST") {
-        // Special handling for CaptureFingerPrint: use pCondBuffer directly (not pInBuffer)
-        bool useCond = (cleanUrl.find("CaptureFingerPrint") != std::string::npos);
+        bool isCaptureFP = (cleanUrl.find("CaptureFingerPrint") != std::string::npos);
 
-        if (!body.empty()) {
-            if (useCond) {
-                // CaptureFingerPrint requires the XML in pCondBuffer (Hikvision ISUP SDK requirement)
-                printf("[ISUP ISAPI] CaptureFingerPrint detected — using pCondBuffer directly\n");
+        if (isCaptureFP) {
+            // CaptureFingerPrint: use ISAPIPassThrough directly (mimics local ISAPI over tunnel)
+            // This is what actually triggers the device display — PostPTXMLConfig fails for this endpoint
+            printf("[ISUP ISAPI] CaptureFingerPrint detected — using ISAPIPassThrough directly\n");
+            if (!body.empty()) {
+                ptParam.pInBuffer = (void*)body.c_str();
+                ptParam.dwInSize = body.length();
+                ptParam.pCondBuffer = NULL;
+                ptParam.dwCondSize = 0;
+            }
+            ret = NET_ECMS_ISAPIPassThrough(userId, &ptParam);
+
+            // Fallback 1: pCondBuffer via PostPTXMLConfig
+            if (!ret) {
+                printf("[ISUP ISAPI] ISAPIPassThrough failed (err %u), trying pCondBuffer...\n",
+                       (unsigned int)NET_ECMS_GetLastError());
                 ptParam.pCondBuffer = (void*)body.c_str();
                 ptParam.dwCondSize = body.length();
                 ptParam.pInBuffer = NULL;
                 ptParam.dwInSize = 0;
-            } else {
+                ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
+            }
+
+            // Fallback 2: pInBuffer via PostPTXMLConfig
+            if (!ret && !body.empty()) {
+                printf("[ISUP ISAPI] pCondBuffer failed (err %u), trying pInBuffer...\n",
+                       (unsigned int)NET_ECMS_GetLastError());
+                ptParam.pInBuffer = (void*)body.c_str();
+                ptParam.dwInSize = body.length();
+                ptParam.pCondBuffer = NULL;
+                ptParam.dwCondSize = 0;
+                ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
+            }
+        } else {
+            // Other POST endpoints: standard pInBuffer approach
+            if (!body.empty()) {
                 ptParam.pInBuffer = (void*)body.c_str();
                 ptParam.dwInSize = body.length();
             }
-        }
-        ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
-
-        // Fallback: if pCondBuffer failed for CaptureFingerPrint, try pInBuffer
-        if (!ret && useCond && !body.empty()) {
-            printf("[ISUP ISAPI] pCondBuffer failed (err %u), retrying CaptureFingerPrint with pInBuffer...\n",
-                   (unsigned int)NET_ECMS_GetLastError());
-            ptParam.pCondBuffer = NULL;
-            ptParam.dwCondSize = 0;
-            ptParam.pInBuffer = (void*)body.c_str();
-            ptParam.dwInSize = body.length();
             ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
-        }
 
-        // Fallback for other POST endpoints: if error 17, retry with pCondBuffer
-        if (!ret && !useCond && NET_ECMS_GetLastError() == 17 && !body.empty()) {
-            printf("[ISUP ISAPI] Retrying POST with pCondBuffer...\n");
-            ptParam.pInBuffer = NULL;
-            ptParam.dwInSize = 0;
-            ptParam.pCondBuffer = (void*)body.c_str();
-            ptParam.dwCondSize = body.length();
-            ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
-        }
+            // Retry with pCondBuffer if error 17
+            if (!ret && NET_ECMS_GetLastError() == 17 && !body.empty()) {
+                printf("[ISUP ISAPI] Retrying POST with pCondBuffer...\n");
+                ptParam.pInBuffer = NULL;
+                ptParam.dwInSize = 0;
+                ptParam.pCondBuffer = (void*)body.c_str();
+                ptParam.dwCondSize = body.length();
+                ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
+            }
 
-        // ISAPIPassThrough fallback (non-CaptureFingerPrint only)
-        if (!ret && !useCond) {
-            ptParam.pInBuffer = (void*)body.c_str();
-            ptParam.dwInSize = body.length();
-            ptParam.pCondBuffer = NULL;
-            ptParam.dwCondSize = 0;
-            ret = NET_ECMS_ISAPIPassThrough(userId, &ptParam);
+            // ISAPIPassThrough fallback
+            if (!ret) {
+                ptParam.pInBuffer = (void*)body.c_str();
+                ptParam.dwInSize = body.length();
+                ptParam.pCondBuffer = NULL;
+                ptParam.dwCondSize = 0;
+                ret = NET_ECMS_ISAPIPassThrough(userId, &ptParam);
+            }
         }
     } else if (method == "DELETE") {
         ret = NET_ECMS_DeletePTXMLConfig(userId, &ptParam);
