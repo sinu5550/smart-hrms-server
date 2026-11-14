@@ -1877,7 +1877,7 @@ function createDevicesRouter(prisma) {
 
       const terminalEmployeeNo = String(emp.employeeId || "").trim().replace(/-/g, "");
 
-      // Ensure employee record is pushed to terminal
+      // 1. Ensure employee record is pushed to terminal
       const setupPayload = JSON.stringify({
         UserInfo: {
           employeeNo: terminalEmployeeNo,
@@ -1901,12 +1901,33 @@ function createDevicesRouter(prisma) {
         timeout: 6000,
       }).catch((e) => console.warn("Prompt ensure user on terminal notice:", e.message));
 
+      // 2. Trigger hardware fingerprint sensor & display on physical device via ISUP
+      const captureXml = `<?xml version="1.0" encoding="UTF-8"?>
+<CaptureFingerPrint version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+    <CaptureFingerPrintCond>
+        <fingerNo>1</fingerNo>
+    </CaptureFingerPrintCond>
+</CaptureFingerPrint>`;
+
+      try {
+        await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+          method: "POST",
+          path: "/ISAPI/AccessControl/CaptureFingerPrint",
+          body: captureXml,
+          timeout: 6000,
+          contentType: "application/xml",
+        });
+        console.log(`[Fingerprint Prompt] Triggered live CaptureFingerPrint screen on ${device.deviceName} for ${emp.fullName} (${terminalEmployeeNo})`);
+      } catch (capErr) {
+        console.warn("[Fingerprint Prompt Capture Notice]:", capErr.message);
+      }
+
       return res.status(200).json({
         success: true,
         terminalEmployeeNo,
         employeeName: emp.fullName,
         deviceName: device.deviceName,
-        message: `Employee "${emp.fullName}" (${terminalEmployeeNo}) is ready for fingerprint placement on ${device.deviceName}.`,
+        message: `Place finger on ${device.deviceName} sensor now. Terminal display is active for ${emp.fullName}.`,
       });
     } catch (err) {
       console.error("Prompt Fingerprint Error:", err);

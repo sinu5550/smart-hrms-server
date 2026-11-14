@@ -26,7 +26,7 @@ const ISUP_CANDIDATE_HOSTS = [
 ].filter(Boolean);
 
 // Helper to send ISAPI via the native Linux ISUP Gateway service
-function sendViaIsupGateway(method, path, body, timeout = 10000) {
+function sendViaIsupGateway(method, path, body, timeout = 10000, contentType = null) {
   return new Promise((resolve, reject) => {
     const isupHost = g_workingIsupHost;
     const isupPort = process.env.ISUP_GATEWAY_PORT || 7661;
@@ -36,7 +36,9 @@ function sendViaIsupGateway(method, path, body, timeout = 10000) {
       path: path,
     }).toString();
 
+    const isXml = typeof body === "string" && (body.trim().startsWith("<") || (contentType && contentType.includes("xml")));
     const postData = typeof body === "string" ? body : (body ? JSON.stringify(body) : "");
+    const resolvedContentType = contentType || (isXml ? "application/xml" : "application/json");
 
     const req = http.request(
       {
@@ -45,7 +47,7 @@ function sendViaIsupGateway(method, path, body, timeout = 10000) {
         path: `/isapi?${queryParams}`,
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": resolvedContentType,
           "Content-Length": Buffer.byteLength(postData),
         },
         timeout: timeout,
@@ -216,10 +218,10 @@ function setupDeviceTunnelServer(httpServer) {
  * 1. Priority 1: Direct native ISUP Gateway (cloud native, zero latency!)
  * 2. Priority 2: Fallback to WebSocket reverse-tunnel if agent is active
  */
-async function sendDeviceCommandViaTunnel(serialNumber, { method, path, body, timeout = 10000 }) {
+async function sendDeviceCommandViaTunnel(serialNumber, { method, path, body, timeout = 10000, contentType = null }) {
   // If ISUP gateway is reachable, use native ISUP 5.0 C++ PassThrough!
   try {
-    const isupRes = await sendViaIsupGateway(method, path, body, timeout);
+    const isupRes = await sendViaIsupGateway(method, path, body, timeout, contentType);
     return isupRes;
   } catch (isupErr) {
     console.warn(`[ISUP Gateway Send Error]:`, isupErr.message);
