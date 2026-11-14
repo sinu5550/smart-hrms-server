@@ -1670,6 +1670,250 @@ function createDevicesRouter(prisma) {
     }
   });
 
+  // GET /api/devices/:id/employee-fingerprints/:employeeId (Fetch registered fingerprints directly from the terminal)
+  router.get("/:id/employee-fingerprints/:employeeId", authenticateToken, async (req, res, next) => {
+    try {
+      const { id, employeeId } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+      if (!device) {
+        return res.status(404).json({ message: "Biometric device not found." });
+      }
+
+      const emp = await prisma.user.findFirst({
+        where: { id: employeeId, organizationId },
+        select: {
+          id: true,
+          employeeId: true,
+          fullName: true,
+          avatarUrl: true,
+          permissions: true,
+          department: { select: { name: true } },
+          designation: { select: { title: true } },
+        },
+      });
+      if (!emp) {
+        return res.status(404).json({ message: "Employee not found." });
+      }
+
+      const terminalEmployeeNo = String(emp.employeeId || "").trim().replace(/-/g, "");
+
+      const queryPayload = JSON.stringify({
+        FingerPrintCond: {
+          searchID: "1",
+          searchResultPosition: 0,
+          maxResults: 10,
+          employeeNo: terminalEmployeeNo,
+        },
+      });
+
+      let fpList = [];
+      try {
+        const resp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+          method: "POST",
+          path: "/ISAPI/AccessControl/FingerPrintUpload?format=json",
+          body: queryPayload,
+          timeout: 8000,
+        });
+
+        if (resp && resp.data?.FingerPrintInfo?.status === "OK") {
+          fpList = resp.data.FingerPrintInfo.FingerPrintList || [];
+        }
+      } catch (err) {
+        console.warn("[FingerPrintUpload ISUP error]:", err.message);
+      }
+
+      // Reconcile DB bio:fingerprint badge
+      try {
+        const curPerms = Array.isArray(emp.permissions) ? emp.permissions : [];
+        if (fpList.length > 0 && !curPerms.includes("bio:fingerprint")) {
+          await prisma.user.update({
+            where: { id: emp.id },
+            data: { permissions: [...curPerms, "bio:fingerprint"] },
+          });
+        } else if (fpList.length === 0 && curPerms.includes("bio:fingerprint")) {
+          await prisma.user.update({
+            where: { id: emp.id },
+            data: { permissions: curPerms.filter((p) => p !== "bio:fingerprint") },
+          });
+        }
+      } catch (dbErr) {
+        console.warn("DB permission update warning:", dbErr.message);
+      }
+
+      return res.status(200).json({
+        success: true,
+        terminalEmployeeNo,
+        employee: emp,
+        fingerprints: fpList,
+        totalFP: fpList.length,
+        device: {
+          id: device.id,
+          name: device.deviceName,
+          model: device.deviceModel,
+          serial: device.deviceSerialNumber,
+        },
+      });
+    } catch (err) {
+      console.error("Fetch Employee Fingerprints Error:", err);
+      return res.status(500).json({ message: err.message || "Failed to fetch fingerprints from hardware." });
+    }
+  });
+
+  // DELETE /api/devices/:id/employee-fingerprints/:employeeId/:fingerPrintId (Delete a specific finger slot from terminal)
+  router.delete("/:id/employee-fingerprints/:employeeId/:fingerPrintId", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
+    try {
+      const { id, employeeId, fingerPrintId } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+      if (!device) {
+        return res.status(404).json({ message: "Biometric device not found." });
+      }
+
+      const emp = await prisma.user.findFirst({
+        where: { id: employeeId, organizationId },
+        select: { id: true, employeeId: true, fullName: true, permissions: true },
+      });
+      if (!emp) {
+        return res.status(404).json({ message: "Employee not found." });
+      }
+
+      const terminalEmployeeNo = String(emp.employeeId || "").trim().replace(/-/g, "");
+      const fpIdNum = parseInt(fingerPrintId, 10);
+      if (isNaN(fpIdNum) || fpIdNum < 1 || fpIdNum > 10) {
+        return res.status(400).json({ message: "Invalid fingerprint slot number (1-10 required)." });
+      }
+
+      const delPayload = JSON.stringify({
+        FingerPrintDelete: {
+          mode: "byEmployeeNo",
+          EmployeeNoDetail: {
+            employeeNo: terminalEmployeeNo,
+            enableCardReader: [1],
+            fingerPrintID: [fpIdNum],
+          },
+        },
+      });
+
+      const delResp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+        method: "PUT",
+        path: "/ISAPI/AccessControl/FingerPrint/Delete?format=json",
+        body: delPayload,
+        timeout: 8000,
+      });
+
+      console.log(`[Delete Fingerprint] Removed FP slot ${fpIdNum} for ${emp.fullName} (${terminalEmployeeNo}):`, delResp?.data);
+
+      // Re-query terminal to get updated count
+      let updatedList = [];
+      try {
+        const queryResp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+          method: "POST",
+          path: "/ISAPI/AccessControl/FingerPrintUpload?format=json",
+          body: JSON.stringify({
+            FingerPrintCond: {
+              searchID: "1",
+              searchResultPosition: 0,
+              maxResults: 10,
+              employeeNo: terminalEmployeeNo,
+            },
+          }),
+          timeout: 6000,
+        });
+        if (queryResp && queryResp.data?.FingerPrintInfo?.status === "OK") {
+          updatedList = queryResp.data.FingerPrintInfo.FingerPrintList || [];
+        }
+      } catch {}
+
+      // Update DB permission
+      try {
+        const curPerms = Array.isArray(emp.permissions) ? emp.permissions : [];
+        if (updatedList.length === 0 && curPerms.includes("bio:fingerprint")) {
+          await prisma.user.update({
+            where: { id: emp.id },
+            data: { permissions: curPerms.filter((p) => p !== "bio:fingerprint") },
+          });
+        }
+      } catch {}
+
+      return res.status(200).json({
+        success: true,
+        message: `Fingerprint #${fpIdNum} removed from device.`,
+        fingerprints: updatedList,
+        totalFP: updatedList.length,
+      });
+    } catch (err) {
+      console.error("Delete Fingerprint Error:", err);
+      return res.status(500).json({ message: err.message || "Failed to remove fingerprint from hardware." });
+    }
+  });
+
+  // POST /api/devices/:id/employee-fingerprints/:employeeId/prompt (Ensure employee exists on machine for enrollment)
+  router.post("/:id/employee-fingerprints/:employeeId/prompt", authenticateToken, async (req, res, next) => {
+    try {
+      const { id, employeeId } = req.params;
+      const organizationId = req.user.organizationId;
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+      if (!device) {
+        return res.status(404).json({ message: "Biometric device not found." });
+      }
+
+      const emp = await prisma.user.findFirst({
+        where: { id: employeeId, organizationId },
+        include: { department: true },
+      });
+      if (!emp) {
+        return res.status(404).json({ message: "Employee not found." });
+      }
+
+      const terminalEmployeeNo = String(emp.employeeId || "").trim().replace(/-/g, "");
+
+      // Ensure employee record is pushed to terminal
+      const setupPayload = JSON.stringify({
+        UserInfo: {
+          employeeNo: terminalEmployeeNo,
+          name: emp.fullName.slice(0, 32).trim(),
+          userType: "normal",
+          Valid: {
+            enable: true,
+            beginTime: "2026-01-01T00:00:00",
+            endTime: "2036-12-31T23:59:59",
+            timeType: "local",
+          },
+          doorRight: "1",
+          RightPlan: [{ doorNo: 1, planTemplateNo: "1" }],
+        },
+      });
+
+      await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+        method: "PUT",
+        path: "/ISAPI/AccessControl/UserInfo/SetUp?format=json",
+        body: setupPayload,
+        timeout: 6000,
+      }).catch((e) => console.warn("Prompt ensure user on terminal notice:", e.message));
+
+      return res.status(200).json({
+        success: true,
+        terminalEmployeeNo,
+        employeeName: emp.fullName,
+        deviceName: device.deviceName,
+        message: `Employee "${emp.fullName}" (${terminalEmployeeNo}) is ready for fingerprint placement on ${device.deviceName}.`,
+      });
+    } catch (err) {
+      console.error("Prompt Fingerprint Error:", err);
+      return res.status(500).json({ message: err.message || "Failed to prepare terminal for fingerprint." });
+    }
+  });
+
   // GET /api/devices/:id/portal (Device Portal details with live persons status)
   router.get("/:id/portal", authenticateToken, requirePermissions(prisma, "devices.view"), async (req, res, next) => {
     try {
