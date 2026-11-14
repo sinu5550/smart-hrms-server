@@ -1692,7 +1692,7 @@ function createDevicesRouter(prisma) {
           avatarUrl: true,
           permissions: true,
           department: { select: { name: true } },
-          designation: { select: { title: true } },
+          designation: { select: { name: true } },
         },
       });
       if (!emp) {
