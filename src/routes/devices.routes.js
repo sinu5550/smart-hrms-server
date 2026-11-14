@@ -144,6 +144,102 @@ function createDevicesRouter(prisma) {
     }
   });
 
+  // PATCH /api/devices/:id (Update Device Information, especially IP Address, Port, Credentials)
+  router.patch("/:id", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organizationId;
+      const dto = req.body || {};
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+      if (!device) {
+        return res.status(404).json({ message: "Device not found." });
+      }
+
+      if (dto.deviceSerialNumber && dto.deviceSerialNumber.trim() !== device.deviceSerialNumber) {
+        const conflict = await prisma.biometricDevice.findFirst({
+          where: { organizationId, deviceSerialNumber: dto.deviceSerialNumber.trim(), NOT: { id } },
+        });
+        if (conflict) {
+          return res.status(400).json({
+            message: `Device with serial number "${dto.deviceSerialNumber.trim()}" is already registered.`,
+          });
+        }
+      }
+
+      const updateData = {};
+      if (dto.deviceName !== undefined) updateData.deviceName = String(dto.deviceName).trim();
+      if (dto.deviceSerialNumber !== undefined) updateData.deviceSerialNumber = String(dto.deviceSerialNumber).trim();
+      if (dto.deviceModel !== undefined) updateData.deviceModel = String(dto.deviceModel).trim();
+      if (dto.ipAddress !== undefined) updateData.ipAddress = String(dto.ipAddress).trim() || null;
+      if (dto.port !== undefined) updateData.port = dto.port ? Number(dto.port) : 80;
+      if (dto.username !== undefined) updateData.username = String(dto.username).trim() || "admin";
+      if (dto.password !== undefined && dto.password !== "") updateData.password = String(dto.password);
+      if (dto.locationName !== undefined) updateData.locationName = String(dto.locationName).trim() || null;
+      if (dto.status !== undefined) updateData.status = dto.status;
+      if (dto.isActive !== undefined) updateData.isActive = Boolean(dto.isActive);
+
+      const updated = await prisma.biometricDevice.update({
+        where: { id },
+        data: updateData,
+      });
+
+      return res.status(200).json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // PUT /api/devices/:id (Alias for full/partial update)
+  router.put("/:id", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organizationId;
+      const dto = req.body || {};
+
+      const device = await prisma.biometricDevice.findFirst({
+        where: { id, organizationId },
+      });
+      if (!device) {
+        return res.status(404).json({ message: "Device not found." });
+      }
+
+      if (dto.deviceSerialNumber && dto.deviceSerialNumber.trim() !== device.deviceSerialNumber) {
+        const conflict = await prisma.biometricDevice.findFirst({
+          where: { organizationId, deviceSerialNumber: dto.deviceSerialNumber.trim(), NOT: { id } },
+        });
+        if (conflict) {
+          return res.status(400).json({
+            message: `Device with serial number "${dto.deviceSerialNumber.trim()}" is already registered.`,
+          });
+        }
+      }
+
+      const updateData = {};
+      if (dto.deviceName !== undefined) updateData.deviceName = String(dto.deviceName).trim();
+      if (dto.deviceSerialNumber !== undefined) updateData.deviceSerialNumber = String(dto.deviceSerialNumber).trim();
+      if (dto.deviceModel !== undefined) updateData.deviceModel = String(dto.deviceModel).trim();
+      if (dto.ipAddress !== undefined) updateData.ipAddress = String(dto.ipAddress).trim() || null;
+      if (dto.port !== undefined) updateData.port = dto.port ? Number(dto.port) : 80;
+      if (dto.username !== undefined) updateData.username = String(dto.username).trim() || "admin";
+      if (dto.password !== undefined && dto.password !== "") updateData.password = String(dto.password);
+      if (dto.locationName !== undefined) updateData.locationName = String(dto.locationName).trim() || null;
+      if (dto.status !== undefined) updateData.status = dto.status;
+      if (dto.isActive !== undefined) updateData.isActive = Boolean(dto.isActive);
+
+      const updated = await prisma.biometricDevice.update({
+        where: { id },
+        data: updateData,
+      });
+
+      return res.status(200).json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // DELETE /api/devices/:id (Admin, HR with devices.manage)
   router.delete("/:id", authenticateToken, requirePermissions(prisma, "devices.manage"), async (req, res, next) => {
     try {
