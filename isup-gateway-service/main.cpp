@@ -255,15 +255,37 @@ std::string execute_isapi(LONG userId, const std::string& method, const std::str
         }
         ret = NET_ECMS_PutPTXMLConfig(userId, &ptParam);
     } else if (method == "POST") {
-        // Attempt 1: body as input parameter (pInBuffer)
+        // Special handling for CaptureFingerPrint: use pCondBuffer directly (not pInBuffer)
+        bool useCond = (cleanUrl.find("CaptureFingerPrint") != std::string::npos);
+
         if (!body.empty()) {
-            ptParam.pInBuffer = (void*)body.c_str();
-            ptParam.dwInSize = body.length();
+            if (useCond) {
+                // CaptureFingerPrint requires the XML in pCondBuffer (Hikvision ISUP SDK requirement)
+                printf("[ISUP ISAPI] CaptureFingerPrint detected — using pCondBuffer directly\n");
+                ptParam.pCondBuffer = (void*)body.c_str();
+                ptParam.dwCondSize = body.length();
+                ptParam.pInBuffer = NULL;
+                ptParam.dwInSize = 0;
+            } else {
+                ptParam.pInBuffer = (void*)body.c_str();
+                ptParam.dwInSize = body.length();
+            }
         }
         ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
 
-        // Attempt 2: if error 17 (parameter error), retry with pCondBuffer
-        if (!ret && NET_ECMS_GetLastError() == 17 && !body.empty()) {
+        // Fallback: if pCondBuffer failed for CaptureFingerPrint, try pInBuffer
+        if (!ret && useCond && !body.empty()) {
+            printf("[ISUP ISAPI] pCondBuffer failed (err %u), retrying CaptureFingerPrint with pInBuffer...\n",
+                   (unsigned int)NET_ECMS_GetLastError());
+            ptParam.pCondBuffer = NULL;
+            ptParam.dwCondSize = 0;
+            ptParam.pInBuffer = (void*)body.c_str();
+            ptParam.dwInSize = body.length();
+            ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
+        }
+
+        // Fallback for other POST endpoints: if error 17, retry with pCondBuffer
+        if (!ret && !useCond && NET_ECMS_GetLastError() == 17 && !body.empty()) {
             printf("[ISUP ISAPI] Retrying POST with pCondBuffer...\n");
             ptParam.pInBuffer = NULL;
             ptParam.dwInSize = 0;
@@ -272,8 +294,8 @@ std::string execute_isapi(LONG userId, const std::string& method, const std::str
             ret = NET_ECMS_PostPTXMLConfig(userId, &ptParam);
         }
 
-        // Attempt 3: General ISAPI PassThrough
-        if (!ret) {
+        // ISAPIPassThrough fallback (non-CaptureFingerPrint only)
+        if (!ret && !useCond) {
             ptParam.pInBuffer = (void*)body.c_str();
             ptParam.dwInSize = body.length();
             ptParam.pCondBuffer = NULL;
