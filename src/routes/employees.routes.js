@@ -143,8 +143,8 @@ async function syncEmployeeToHikvisionDevices(prisma, organizationId, employee) 
 }
 
 // Helper to push employee face picture to all active Hikvision biometric terminals
-async function pushFaceToHikvisionDevices(prisma, organizationId, employee, imageBuffer) {
-  if (!employee || !employee.employeeId || !imageBuffer) return;
+async function pushFaceToHikvisionDevices(prisma, organizationId, employee, imageBufferOrUrl) {
+  if (!employee || !employee.employeeId) return;
   try {
     const devices = await prisma.biometricDevice.findMany({
       where: { organizationId, status: "ONLINE" },
@@ -154,143 +154,177 @@ async function pushFaceToHikvisionDevices(prisma, organizationId, employee, imag
     // Hikvision does NOT accept dashes in terminal IDs.
     // Strip all hyphens from employeeId: EKH-26-0018 -> EKH260018 (never just '18')
     const terminalEmployeeNo = String(employee.employeeId || "").trim().replace(/-/g, "");
-
-    const path = "/ISAPI/Intelligent/FDLib/FDSetUp?format=json";
-    const boundary = "----WebKitFormBoundary" + crypto.randomBytes(16).toString("hex");
-    const jsonMetadata = JSON.stringify({
-      faceLibType: "blackFD",
-      FDID: "1",
-      FPID: terminalEmployeeNo,
-    });
-
-    const head =
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="FaceDataRecord"\r\n` +
-      `Content-Type: application/json\r\n` +
-      `Content-Length: ${Buffer.byteLength(jsonMetadata)}\r\n\r\n` +
-      `${jsonMetadata}\r\n` +
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="img"; filename="face.jpg"\r\n` +
-      `Content-Type: image/jpeg\r\n` +
-      `Content-Length: ${imageBuffer.length}\r\n\r\n`;
-
-    const tail = `\r\n--${boundary}--\r\n`;
-    const multipartBody = Buffer.concat([
-      Buffer.from(head, "utf-8"),
-      imageBuffer,
-      Buffer.from(tail, "utf-8"),
-    ]);
+    const avatarUrl = typeof imageBufferOrUrl === "string" ? imageBufferOrUrl : employee.avatarUrl;
+    let imageBuffer = Buffer.isBuffer(imageBufferOrUrl) ? imageBufferOrUrl : null;
 
     for (const dev of devices) {
-      if (!dev.ipAddress || dev.ipAddress === "10.0.0.2" || dev.ipAddress.startsWith("10.") || dev.ipAddress.startsWith("192.168.") || dev.ipAddress.startsWith("172.")) continue;
-      const host = dev.ipAddress;
-      const user = dev.username || "admin";
-      const pass = dev.password || "";
+      if (!dev.deviceSerialNumber) continue;
 
-      new Promise((resolve) => {
-        const req1 = https.request(
-          {
-            hostname: host,
-            port: 443,
-            path,
+      let facePushed = false;
+
+      // 1. Priority 1: ISUP Gateway Tunnel using faceURL (instant, works anywhere behind NAT / Guest Wi-Fi)
+      if (avatarUrl && avatarUrl.startsWith("http")) {
+        try {
+          const facePayload = JSON.stringify({
+            faceLibType: "blackFD",
+            FDID: "1",
+            FPID: terminalEmployeeNo,
+            faceURL: avatarUrl,
+          });
+
+          console.log(`[Auto-Sync Face] Pushing faceURL for ${employee.fullName} (${terminalEmployeeNo}) to ${dev.deviceSerialNumber} via ISUP...`);
+          const isupRes = await sendDeviceCommandViaTunnel(dev.deviceSerialNumber, {
             method: "PUT",
-            rejectUnauthorized: false,
-            timeout: 7000,
-            headers: {
-              "Content-Type": `multipart/form-data; boundary=${boundary}`,
-              "Content-Length": 0,
-            },
-          },
-          (res1) => {
-            if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-              const authHeader = res1.headers["www-authenticate"];
-              const parts = {};
-              authHeader
-                .replace(/^Digest\s+/, "")
-                .split(/,\s*/)
-                .forEach((p) => {
-                  const idx = p.indexOf("=");
-                  if (idx !== -1)
-                    parts[p.slice(0, idx).trim()] = p
-                      .slice(idx + 1)
-                      .replace(/"/g, "")
-                      .trim();
-                });
-              const realm = parts.realm || "";
-              const nonce = parts.nonce || "";
-              const qop = parts.qop || "";
-              const cnonce = crypto.randomBytes(8).toString("hex");
-              const nc = "00000001";
-              const ha1 = crypto
-                .createHash("md5")
-                .update(`${user}:${realm}:${pass}`)
-                .digest("hex");
-              const ha2 = crypto
-                .createHash("md5")
-                .update(`PUT:${path}`)
-                .digest("hex");
-              const digest = qop.includes("auth")
-                ? `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", qop=auth, nc=${nc}, cnonce="${cnonce}", response="${crypto
-                    .createHash("md5")
-                    .update(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`)
-                    .digest("hex")}"`
-                : `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", response="${crypto
-                    .createHash("md5")
-                    .update(`${ha1}:${nonce}:${ha2}`)
-                    .digest("hex")}"`;
+            path: "/ISAPI/Intelligent/FDLib/FDSetUp?format=json",
+            body: facePayload,
+          });
 
-              const req2 = https.request(
-                {
-                  hostname: host,
-                  port: 443,
-                  path,
-                  method: "PUT",
-                  rejectUnauthorized: false,
-                  timeout: 8000,
-                  headers: {
-                    "Content-Type": `multipart/form-data; boundary=${boundary}`,
-                    "Content-Length": multipartBody.length,
-                    Authorization: digest,
-                  },
-                },
-                (res2) => {
-                  let b = "";
-                  res2.on("data", (c) => (b += c));
-                  res2.on("end", async () => {
-                    if (res2.statusCode === 200) {
-                      try {
-                        const cur = await prisma.user.findUnique({
-                          where: { id: employee.id },
-                          select: { permissions: true },
-                        });
-                        const perms = Array.isArray(cur?.permissions) ? cur.permissions : [];
-                        if (!perms.includes("bio:face")) {
-                          await prisma.user.update({
-                            where: { id: employee.id },
-                            data: { permissions: [...perms, "bio:face"] },
-                          });
-                        }
-                      } catch (dbErr) {
-                        console.warn("DB bio:face permission update warning:", dbErr.message);
-                      }
-                    }
-                    resolve({ statusCode: res2.statusCode, data: b });
-                  });
-                }
-              );
-              req2.on("error", resolve);
-              req2.write(multipartBody);
-              req2.end();
-            } else {
-              resolve({ statusCode: res1.statusCode });
-            }
+          if (isupRes && (isupRes.statusCode === 200 || isupRes.data?.statusCode === 1)) {
+            console.log(`[Auto-Sync Face] ✓ Successfully enrolled face for ${employee.fullName} on ${dev.deviceName} via ISUP!`);
+            facePushed = true;
           }
-        );
-        req1.on("error", resolve);
-        req1.end();
-      }).catch((e) =>
-        console.warn(`Face upload to Hikvision skipped for ${dev.deviceName}:`, e.message)
-      );
+        } catch (isupErr) {
+          console.warn(`[Auto-Sync Face] ISUP faceURL push warning for ${dev.deviceName}:`, isupErr.message);
+        }
+      }
+
+      // 2. Priority 2: Fallback to direct network multipart upload if local/LAN IP
+      if (!facePushed && imageBuffer && dev.ipAddress && !dev.ipAddress.startsWith("10.") && !dev.ipAddress.startsWith("192.168.")) {
+        const path = "/ISAPI/Intelligent/FDLib/FDSetUp?format=json";
+        const boundary = "----WebKitFormBoundary" + crypto.randomBytes(16).toString("hex");
+        const jsonMetadata = JSON.stringify({
+          faceLibType: "blackFD",
+          FDID: "1",
+          FPID: terminalEmployeeNo,
+        });
+
+        const head =
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="FaceDataRecord"\r\n` +
+          `Content-Type: application/json\r\n` +
+          `Content-Length: ${Buffer.byteLength(jsonMetadata)}\r\n\r\n` +
+          `${jsonMetadata}\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="img"; filename="face.jpg"\r\n` +
+          `Content-Type: image/jpeg\r\n` +
+          `Content-Length: ${imageBuffer.length}\r\n\r\n`;
+
+        const tail = `\r\n--${boundary}--\r\n`;
+        const multipartBody = Buffer.concat([
+          Buffer.from(head, "utf-8"),
+          imageBuffer,
+          Buffer.from(tail, "utf-8"),
+        ]);
+
+        const host = dev.ipAddress;
+        const user = dev.username || "admin";
+        const pass = dev.password || "";
+
+        try {
+          await new Promise((resolve) => {
+            const req1 = https.request(
+              {
+                hostname: host,
+                port: 443,
+                path,
+                method: "PUT",
+                rejectUnauthorized: false,
+                timeout: 7000,
+                headers: {
+                  "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                  "Content-Length": 0,
+                },
+              },
+              (res1) => {
+                if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                  const authHeader = res1.headers["www-authenticate"];
+                  const parts = {};
+                  authHeader
+                    .replace(/^Digest\s+/, "")
+                    .split(/,\s*/)
+                    .forEach((p) => {
+                      const idx = p.indexOf("=");
+                      if (idx !== -1)
+                        parts[p.slice(0, idx).trim()] = p
+                          .slice(idx + 1)
+                          .replace(/"/g, "")
+                          .trim();
+                    });
+                  const realm = parts.realm || "";
+                  const nonce = parts.nonce || "";
+                  const qop = parts.qop || "";
+                  const cnonce = crypto.randomBytes(8).toString("hex");
+                  const nc = "00000001";
+                  const ha1 = crypto
+                    .createHash("md5")
+                    .update(`${user}:${realm}:${pass}`)
+                    .digest("hex");
+                  const ha2 = crypto
+                    .createHash("md5")
+                    .update(`PUT:${path}`)
+                    .digest("hex");
+                  const digest = qop.includes("auth")
+                    ? `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", qop=auth, nc=${nc}, cnonce="${cnonce}", response="${crypto
+                        .createHash("md5")
+                        .update(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`)
+                        .digest("hex")}"`
+                    : `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", response="${crypto
+                        .createHash("md5")
+                        .update(`${ha1}:${nonce}:${ha2}`)
+                        .digest("hex")}"`;
+
+                  const req2 = https.request(
+                    {
+                      hostname: host,
+                      port: 443,
+                      path,
+                      method: "PUT",
+                      rejectUnauthorized: false,
+                      timeout: 8000,
+                      headers: {
+                        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                        "Content-Length": multipartBody.length,
+                        Authorization: digest,
+                      },
+                    },
+                    (res2) => {
+                      if (res2.statusCode === 200) facePushed = true;
+                      resolve();
+                    }
+                  );
+                  req2.on("error", resolve);
+                  req2.write(multipartBody);
+                  req2.end();
+                } else {
+                  resolve();
+                }
+              }
+            );
+            req1.on("error", resolve);
+            req1.end();
+          });
+        } catch (e) {
+          console.warn(`Face upload direct error for ${dev.deviceName}:`, e.message);
+        }
+      }
+
+      if (facePushed) {
+        try {
+          const cur = await prisma.user.findUnique({
+            where: { id: employee.id },
+            select: { permissions: true },
+          });
+          const perms = Array.isArray(cur?.permissions) ? cur.permissions : [];
+          if (!perms.includes("bio:face")) {
+            await prisma.user.update({
+              where: { id: employee.id },
+              data: { permissions: [...perms, "bio:face"] },
+            });
+          }
+        } catch (dbErr) {
+          console.warn("DB bio:face permission update warning:", dbErr.message);
+        }
+      }
     }
   } catch (err) {
     console.warn("pushFaceToHikvisionDevices error:", err.message);
@@ -961,6 +995,7 @@ function createEmployeesRouter(prisma) {
           dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
           gender: dto.gender,
           joiningDate: dto.joiningDate ? new Date(dto.joiningDate) : undefined,
+          avatarUrl: dto.avatarUrl || undefined,
         },
         select: {
           id: true,
@@ -969,6 +1004,7 @@ function createEmployeesRouter(prisma) {
           fullName: true,
           role: true,
           status: true,
+          avatarUrl: true,
         },
       });
 
@@ -976,6 +1012,13 @@ function createEmployeesRouter(prisma) {
       syncEmployeeToHikvisionDevices(prisma, organizationId, user).catch((err) =>
         console.warn("Auto-sync to Hikvision on create failed:", err.message)
       );
+
+      // Auto-sync face to Hikvision if avatarUrl was provided
+      if (dto.avatarUrl && dto.avatarUrl.startsWith("http")) {
+        pushFaceToHikvisionDevices(prisma, organizationId, user, dto.avatarUrl).catch((err) =>
+          console.warn("Auto-sync face to Hikvision on create failed:", err.message)
+        );
+      }
 
       return res.status(201).json({
         user,
@@ -1191,17 +1234,11 @@ function createEmployeesRouter(prisma) {
         console.warn("Auto-sync to Hikvision on update failed:", err.message)
       );
 
-      // If avatarUrl was modified/provided, download and push face to terminal
+      // If avatarUrl was modified/provided, push face to terminal
       if (dto.avatarUrl && dto.avatarUrl.startsWith("http")) {
-        fetch(dto.avatarUrl)
-          .then((r) => (r.ok ? r.arrayBuffer() : null))
-          .then((ab) => {
-            if (ab) {
-              const buf = Buffer.from(ab);
-              return pushFaceToHikvisionDevices(prisma, organizationId, updated, buf);
-            }
-          })
-          .catch((err) => console.warn("Syncing updated avatarUrl to Hikvision failed:", err.message));
+        pushFaceToHikvisionDevices(prisma, organizationId, updated, dto.avatarUrl).catch((err) =>
+          console.warn("Syncing updated avatarUrl to Hikvision failed:", err.message)
+        );
       }
 
       return res.status(200).json(updated);
@@ -1382,11 +1419,9 @@ function createEmployeesRouter(prisma) {
       });
 
       // Auto-push the uploaded face image to all active Hikvision devices
-      if (req.file?.buffer) {
-        pushFaceToHikvisionDevices(prisma, organizationId, updated, req.file.buffer).catch((err) =>
-          console.warn("Auto-push face to Hikvision failed:", err.message)
-        );
-      }
+      pushFaceToHikvisionDevices(prisma, organizationId, updated, data.secure_url).catch((err) =>
+        console.warn("Auto-push face to Hikvision failed:", err.message)
+      );
 
       return res.status(200).json(updated);
     } catch (err) {

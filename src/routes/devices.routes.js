@@ -1226,87 +1226,123 @@ function createDevicesRouter(prisma) {
 
       // If employee has an avatar photo, also push the face image to the terminal
       if (emp.avatarUrl && emp.avatarUrl.startsWith("http")) {
-        fetch(emp.avatarUrl)
-          .then((r) => (r.ok ? r.arrayBuffer() : null))
-          .then((ab) => {
-            if (!ab) return;
-            const imgBuf = Buffer.from(ab);
-            const boundary = "----WebKitFormBoundary" + crypto.randomBytes(16).toString("hex");
-            const fdSetupPath = "/ISAPI/Intelligent/FDLib/FDSetUp?format=json";
-            const jsonMetadata = JSON.stringify({
+        let facePushed = false;
+
+        // 1. Priority 1: ISUP Gateway Tunnel with faceURL (zero network dependency)
+        if (isDeviceTunnelOnline(device.deviceSerialNumber)) {
+          try {
+            const facePayload = JSON.stringify({
               faceLibType: "blackFD",
               FDID: "1",
               FPID: terminalEmployeeNo,
+              faceURL: emp.avatarUrl,
             });
-            const head =
-              `--${boundary}\r\n` +
-              `Content-Disposition: form-data; name="FaceDataRecord"\r\n` +
-              `Content-Type: application/json\r\n` +
-              `Content-Length: ${Buffer.byteLength(jsonMetadata)}\r\n\r\n` +
-              `${jsonMetadata}\r\n` +
-              `--${boundary}\r\n` +
-              `Content-Disposition: form-data; name="img"; filename="face.jpg"\r\n` +
-              `Content-Type: image/jpeg\r\n` +
-              `Content-Length: ${imgBuf.length}\r\n\r\n`;
-            const tail = `\r\n--${boundary}--\r\n`;
-            const multipartBody = Buffer.concat([
-              Buffer.from(head, "utf-8"),
-              imgBuf,
-              Buffer.from(tail, "utf-8"),
-            ]);
+            const isupResp = await sendDeviceCommandViaTunnel(device.deviceSerialNumber, {
+              method: "PUT",
+              path: "/ISAPI/Intelligent/FDLib/FDSetUp?format=json",
+              body: facePayload,
+            });
+            if (isupResp && (isupResp.statusCode === 200 || isupResp.data?.statusCode === 1)) {
+              facePushed = true;
+              console.log(`[Push Employee] ✓ Face enrolled for ${emp.fullName} via ISUP tunnel!`);
+            }
+          } catch (tErr) {
+            console.warn("[Tunnel Face Push Failed, falling back to direct]", tErr.message);
+          }
+        }
 
-            const r1 = https.request(
-              {
-                hostname: host,
-                port: 443,
-                path: fdSetupPath,
-                method: "PUT",
-                rejectUnauthorized: false,
-                timeout: 7000,
-                headers: {
-                  "Content-Type": `multipart/form-data; boundary=${boundary}`,
-                  "Content-Length": 0,
-                },
-              },
-              (res1) => {
-                if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
-                  const digest = buildDigestHeader("PUT", fdSetupPath, user, pass, res1.headers["www-authenticate"]);
-                  const r2 = https.request(
-                    {
-                      hostname: host,
-                      port: 443,
-                      path: fdSetupPath,
-                      method: "PUT",
-                      rejectUnauthorized: false,
-                      timeout: 8000,
-                      headers: {
-                        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-                        "Content-Length": multipartBody.length,
-                        Authorization: digest,
-                      },
+        // 2. Priority 2: Fallback to direct network multipart upload if routable IP
+        if (!facePushed && host && !host.startsWith("10.") && !host.startsWith("192.168.")) {
+          try {
+            const ab = await fetch(emp.avatarUrl).then((r) => (r.ok ? r.arrayBuffer() : null));
+            if (ab) {
+              const imgBuf = Buffer.from(ab);
+              const boundary = "----WebKitFormBoundary" + crypto.randomBytes(16).toString("hex");
+              const fdSetupPath = "/ISAPI/Intelligent/FDLib/FDSetUp?format=json";
+              const jsonMetadata = JSON.stringify({
+                faceLibType: "blackFD",
+                FDID: "1",
+                FPID: terminalEmployeeNo,
+              });
+              const head =
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="FaceDataRecord"\r\n` +
+                `Content-Type: application/json\r\n` +
+                `Content-Length: ${Buffer.byteLength(jsonMetadata)}\r\n\r\n` +
+                `${jsonMetadata}\r\n` +
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="img"; filename="face.jpg"\r\n` +
+                `Content-Type: image/jpeg\r\n` +
+                `Content-Length: ${imgBuf.length}\r\n\r\n`;
+              const tail = `\r\n--${boundary}--\r\n`;
+              const multipartBody = Buffer.concat([
+                Buffer.from(head, "utf-8"),
+                imgBuf,
+                Buffer.from(tail, "utf-8"),
+              ]);
+
+              await new Promise((resolve) => {
+                const r1 = https.request(
+                  {
+                    hostname: host,
+                    port: 443,
+                    path: fdSetupPath,
+                    method: "PUT",
+                    rejectUnauthorized: false,
+                    timeout: 7000,
+                    headers: {
+                      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                      "Content-Length": 0,
                     },
-                    (res2) => {
-                      if (res2.statusCode === 200) {
-                        const curPerms = Array.isArray(emp.permissions) ? emp.permissions : [];
-                        if (!curPerms.includes("bio:face")) {
-                          prisma.user.update({
-                            where: { id: emp.id },
-                            data: { permissions: [...curPerms, "bio:face"] },
-                          }).catch(() => {});
+                  },
+                  (res1) => {
+                    if (res1.statusCode === 401 && res1.headers["www-authenticate"]) {
+                      const digest = buildDigestHeader("PUT", fdSetupPath, user, pass, res1.headers["www-authenticate"]);
+                      const r2 = https.request(
+                        {
+                          hostname: host,
+                          port: 443,
+                          path: fdSetupPath,
+                          method: "PUT",
+                          rejectUnauthorized: false,
+                          timeout: 8000,
+                          headers: {
+                            "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                            "Content-Length": multipartBody.length,
+                            Authorization: digest,
+                          },
+                        },
+                        (res2) => {
+                          if (res2.statusCode === 200) facePushed = true;
+                          resolve();
                         }
-                      }
+                      );
+                      r2.on("error", resolve);
+                      r2.write(multipartBody);
+                      r2.end();
+                    } else {
+                      resolve();
                     }
-                  );
-                  r2.on("error", () => {});
-                  r2.write(multipartBody);
-                  r2.end();
-                }
-              }
-            );
-            r1.on("error", () => {});
-            r1.end();
-          })
-          .catch((e) => console.warn("Push employee face image notice:", e.message));
+                  }
+                );
+                r1.on("error", resolve);
+                r1.end();
+              });
+            }
+          } catch (e) {
+            console.warn("Direct face push warning:", e.message);
+          }
+        }
+
+        if (facePushed) {
+          const curPerms = Array.isArray(emp.permissions) ? emp.permissions : [];
+          if (!curPerms.includes("bio:face")) {
+            await prisma.user.update({
+              where: { id: emp.id },
+              data: { permissions: [...curPerms, "bio:face"] },
+            }).catch(() => {});
+          }
+        }
       }
 
       return res.status(200).json({
