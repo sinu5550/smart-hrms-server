@@ -1691,8 +1691,6 @@ function createDevicesRouter(prisma) {
           fullName: true,
           avatarUrl: true,
           permissions: true,
-          department: { select: { name: true } },
-          designation: { select: { name: true } },
         },
       });
       if (!emp) {
@@ -1869,7 +1867,11 @@ function createDevicesRouter(prisma) {
 
       const emp = await prisma.user.findFirst({
         where: { id: employeeId, organizationId },
-        include: { department: true },
+        select: {
+          id: true,
+          employeeId: true,
+          fullName: true,
+        },
       });
       if (!emp) {
         return res.status(404).json({ message: "Employee not found." });
