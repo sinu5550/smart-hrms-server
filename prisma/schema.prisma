@@ -235,6 +235,11 @@ model Attendance {
   punchOutLatitude  Float?                 @map("punch_out_latitude")
   punchOutLongitude Float?                 @map("punch_out_longitude")
   punchOutAddress   String?                @map("punch_out_address") @db.Text
+  lateReason        String?                @map("late_reason") @db.Text
+  lateReasonStatus  String?                @map("late_reason_status") // PENDING, APPROVED, REJECTED
+  lateReasonReviewerId String?             @map("late_reason_reviewer_id") @db.Uuid
+  lateReasonReviewedAt DateTime?           @map("late_reason_reviewed_at")
+  lateReasonReviewNote String?             @map("late_reason_review_note") @db.Text
   createdAt         DateTime               @default(now()) @map("created_at")
   updatedAt         DateTime               @updatedAt @map("updated_at")
 
@@ -380,6 +385,8 @@ model OfficeSetting {
   endTime            String        @default("18:00") @map("end_time") // HH:mm format, for example "18:00".
   gracePeriodMinutes    Int           @default(30) @map("grace_period_minutes") // Grace period in minutes, for example through 09:30.
   overtimeThresholdMins Int           @default(30) @map("overtime_threshold_mins") // Overtime buffer in minutes after shift end, default 30.
+  requireLateReason     Boolean       @default(false) @map("require_late_reason") // Whether late arrival requires an explanation
+  lateReasonThresholdMins Int         @default(30) @map("late_reason_threshold_mins") // Additional minutes after grace period when late reason becomes mandatory
   isDefault             Boolean       @default(true) @map("is_default")
   updatedAt          DateTime      @updatedAt @map("updated_at")
   Organization       Organization? @relation(fields: [organizationId], references: [id])

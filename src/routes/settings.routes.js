@@ -144,6 +144,8 @@ function createSettingsRouter(prisma) {
       const updateData = { ...dto };
       if (dto.gracePeriodMinutes !== undefined) updateData.gracePeriodMinutes = Number(dto.gracePeriodMinutes);
       if (dto.overtimeThresholdMins !== undefined) updateData.overtimeThresholdMins = Number(dto.overtimeThresholdMins);
+      if (dto.requireLateReason !== undefined) updateData.requireLateReason = Boolean(dto.requireLateReason);
+      if (dto.lateReasonThresholdMins !== undefined) updateData.lateReasonThresholdMins = Number(dto.lateReasonThresholdMins);
 
       let result;
       if (targetShift) {
@@ -184,6 +186,8 @@ function createSettingsRouter(prisma) {
       const updateData = { ...dto };
       if (dto.gracePeriodMinutes !== undefined) updateData.gracePeriodMinutes = Number(dto.gracePeriodMinutes);
       if (dto.overtimeThresholdMins !== undefined) updateData.overtimeThresholdMins = Number(dto.overtimeThresholdMins);
+      if (dto.requireLateReason !== undefined) updateData.requireLateReason = Boolean(dto.requireLateReason);
+      if (dto.lateReasonThresholdMins !== undefined) updateData.lateReasonThresholdMins = Number(dto.lateReasonThresholdMins);
 
       const updated = await prisma.officeSetting.update({
         where: { id },

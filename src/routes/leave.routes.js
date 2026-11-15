@@ -87,8 +87,25 @@ function createLeaveRouter(prisma) {
       const headedDeptIds = headedDepts.map((d) => d.id);
       const isDeptHead = headedDeptIds.length > 0;
 
+      const isPortalRequest = req.query.portal === "true";
+
       let whereClause = {};
-      if (isManager) {
+      if (isPortalRequest) {
+        // If query is explicitly from employee portal:
+        // - If dept head: see their own leaves + their headed department members' leaves
+        // - If not dept head: ONLY see their own leaves
+        if (isDeptHead) {
+          whereClause = {
+            organizationId,
+            OR: [
+              { userId: callerUserId },
+              { user: { departmentId: { in: headedDeptIds } } },
+            ],
+          };
+        } else {
+          whereClause = { organizationId, userId: callerUserId };
+        }
+      } else if (isManager) {
         whereClause = { organizationId };
       } else if (isDeptHead) {
         // Dept Head sees their own leaves OR leaves of members in their department

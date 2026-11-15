@@ -36,8 +36,12 @@ function createAttendanceRouter(prisma) {
   async function calculateShiftStatus(organizationId, userId, checkInDate) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { shiftId: true },
+      select: { shiftId: true, attendanceExempt: true, role: true },
     });
+
+    if (user?.attendanceExempt || user?.role === "OWNER") {
+      return { status: "PRESENT", requiresLateReason: false, lateMinutes: 0, lateReasonStatus: null };
+    }
 
     let setting = user?.shiftId
       ? await prisma.officeSetting.findUnique({ where: { id: user.shiftId } })
@@ -49,17 +53,38 @@ function createAttendanceRouter(prisma) {
       });
     }
 
+    if (!setting) {
+      setting = await prisma.officeSetting.findFirst({
+        where: { organizationId },
+      });
+    }
+
     const startTimeStr = setting?.startTime || "09:00";
     const graceMinutes = setting?.gracePeriodMinutes ?? 30;
-    const [startHour, startMinute] = startTimeStr.split(":").map(Number);
+    const requireLateReason = Boolean(setting?.requireLateReason);
+    const lateThresholdMins = setting?.lateReasonThresholdMins ?? 30;
 
-    const cutoffTotalMinutes = startHour * 60 + startMinute + graceMinutes;
-    const checkInTotalMinutes = checkInDate.getHours() * 60 + checkInDate.getMinutes();
+    const [startHour, startMinute] = startTimeStr.split(":").map(Number);
+    const shiftStartTotalMinutes = startHour * 60 + startMinute;
+    const cutoffTotalMinutes = shiftStartTotalMinutes + graceMinutes;
+    const extremeThresholdTotalMinutes = cutoffTotalMinutes + lateThresholdMins;
+
+    // Convert checkInDate to Bangladesh time (UTC+6)
+    const checkIn = new Date(checkInDate);
+    const checkInTotalMinutes = ((checkIn.getUTCHours() + 6) % 24) * 60 + checkIn.getUTCMinutes();
 
     if (checkInTotalMinutes > cutoffTotalMinutes) {
-      return "LATE";
+      const lateMinutes = checkInTotalMinutes - shiftStartTotalMinutes;
+      const requiresLateReason = requireLateReason && (checkInTotalMinutes > extremeThresholdTotalMinutes);
+      return {
+        status: "LATE",
+        requiresLateReason,
+        lateMinutes,
+        lateReasonStatus: requiresLateReason ? "PENDING" : null,
+      };
     }
-    return "PRESENT";
+
+    return { status: "PRESENT", requiresLateReason: false, lateMinutes: 0, lateReasonStatus: null };
   }
 
   // Calculate Overtime Minutes based on user's shift settings and check-out time
@@ -293,7 +318,7 @@ function createAttendanceRouter(prisma) {
         }
 
         const ipAddress = resolveClientIp(req);
-        const status = await calculateShiftStatus(req.user.organizationId, req.user.userId, now);
+        const shiftEval = await calculateShiftStatus(req.user.organizationId, req.user.userId, now);
 
         const record = await prisma.attendance.create({
           data: {
@@ -302,7 +327,8 @@ function createAttendanceRouter(prisma) {
             date: today,
             checkInTime: now,
             currentState: "CHECKED_IN",
-            status,
+            status: shiftEval.status,
+            lateReasonStatus: shiftEval.lateReasonStatus,
             ipAddress,
             punchInLatitude: dto.latitude || null,
             punchInLongitude: dto.longitude || null,
@@ -548,6 +574,154 @@ function createAttendanceRouter(prisma) {
       }
     }
   );
+
+  // POST /api/attendance/submit-late-reason (Employee submits explanation for late check-in)
+  router.post("/submit-late-reason", async (req, res, next) => {
+    try {
+      const { attendanceId, reason } = req.body || {};
+      const userId = req.user.userId;
+      const organizationId = req.user.organizationId;
+
+      if (!reason || !reason.trim()) {
+        return res.status(400).json({ message: "Late reason explanation is required." });
+      }
+
+      let att = null;
+      if (attendanceId) {
+        att = await prisma.attendance.findFirst({
+          where: { id: attendanceId, userId, organizationId },
+        });
+      } else {
+        const today = await getOrganizationAttendanceDate(organizationId);
+        att = await prisma.attendance.findUnique({
+          where: { userId_date: { userId, date: today } },
+        });
+      }
+
+      if (!att) {
+        return res.status(404).json({ message: "Attendance record not found." });
+      }
+
+      const updated = await prisma.attendance.update({
+        where: { id: att.id },
+        data: {
+          lateReason: reason.trim(),
+          lateReasonStatus: "PENDING",
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Late reason submitted successfully. Awaiting HR/Admin approval.",
+        attendance: updated,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /api/attendance/admin/late-requests (List pending/all late reason submissions for HR/Admin)
+  router.get("/admin/late-requests", requireRoles("HR", "ADMIN"), async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { status } = req.query; // PENDING, APPROVED, REJECTED, ALL
+
+      let whereClause = {
+        organizationId,
+        lateReasonStatus: { not: null },
+      };
+
+      if (status && status !== "ALL") {
+        whereClause.lateReasonStatus = status;
+      }
+
+      const requests = await prisma.attendance.findMany({
+        where: whereClause,
+        orderBy: [{ date: "desc" }, { checkInTime: "desc" }],
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              employeeId: true,
+              avatarUrl: true,
+              department: { select: { id: true, name: true } },
+              designation: { select: { id: true, name: true } },
+              shift: {
+                select: {
+                  id: true,
+                  shiftName: true,
+                  startTime: true,
+                  endTime: true,
+                  gracePeriodMinutes: true,
+                  lateReasonThresholdMins: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      return res.status(200).json(requests);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // PATCH /api/attendance/admin/late-requests/:id/action (Approve or Reject late reason)
+  router.patch("/admin/late-requests/:id/action", requireRoles("HR", "ADMIN"), async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { action, note } = req.body || {}; // action: "APPROVE" | "REJECT"
+      const organizationId = req.user.organizationId;
+      const reviewerId = req.user.userId;
+
+      if (!["APPROVE", "REJECT"].includes(action)) {
+        return res.status(400).json({ message: "Action must be either APPROVE or REJECT." });
+      }
+
+      const att = await prisma.attendance.findFirst({
+        where: { id, organizationId },
+      });
+
+      if (!att) {
+        return res.status(404).json({ message: "Attendance record not found." });
+      }
+
+      let updateData = {
+        lateReasonReviewedAt: new Date(),
+        lateReasonReviewerId: reviewerId,
+        lateReasonReviewNote: note || null,
+      };
+
+      if (action === "APPROVE") {
+        // If approved: Keep real checkInTime untouched! Mark status as counted (LATE or PRESENT).
+        updateData.lateReasonStatus = "APPROVED";
+      } else {
+        // If rejected: Attendance is not counted / marked ABSENT
+        updateData.lateReasonStatus = "REJECTED";
+        updateData.status = "ABSENT";
+      }
+
+      const updated = await prisma.attendance.update({
+        where: { id },
+        data: updateData,
+        include: {
+          user: {
+            select: { id: true, fullName: true, employeeId: true },
+          },
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: action === "APPROVE" ? "Late reason approved. Attendance is counted." : "Late reason rejected. Attendance marked as absent.",
+        attendance: updated,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // GET /api/attendance/admin/today
   router.get("/admin/today", requireRoles("HR", "ADMIN"), async (req, res, next) => {

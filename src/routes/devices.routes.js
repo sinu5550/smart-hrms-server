@@ -432,7 +432,7 @@ function createDevicesRouter(prisma) {
       });
 
       if (user?.attendanceExempt || user?.role === "OWNER") {
-        return "PRESENT";
+        return { status: "PRESENT", requiresLateReason: false, lateMinutes: 0, lateReasonStatus: null };
       }
 
       let setting = user?.shiftId
@@ -453,9 +453,13 @@ function createDevicesRouter(prisma) {
 
       const startTimeStr = setting?.startTime || "09:00";
       const graceMinutes = typeof setting?.gracePeriodMinutes === "number" ? setting.gracePeriodMinutes : 30;
-      const [startHour, startMinute] = startTimeStr.split(":").map(Number);
+      const requireLateReason = Boolean(setting?.requireLateReason);
+      const lateThresholdMins = setting?.lateReasonThresholdMins ?? 30;
 
-      const cutoffMinutes = startHour * 60 + startMinute + graceMinutes;
+      const [startHour, startMinute] = startTimeStr.split(":").map(Number);
+      const shiftStartTotalMinutes = startHour * 60 + startMinute;
+      const cutoffMinutes = shiftStartTotalMinutes + graceMinutes;
+      const extremeThresholdMinutes = cutoffMinutes + lateThresholdMins;
       
       // Calculate local minutes from midnight in Bangladesh (UTC+6)
       // checkInDate is a Date instance.
@@ -463,12 +467,19 @@ function createDevicesRouter(prisma) {
       const checkInTotalMinutes = ((checkIn.getUTCHours() + 6) % 24) * 60 + checkIn.getUTCMinutes();
 
       if (checkInTotalMinutes > cutoffMinutes) {
-        return "LATE";
+        const lateMinutes = checkInTotalMinutes - shiftStartTotalMinutes;
+        const requiresLateReason = requireLateReason && (checkInTotalMinutes > extremeThresholdMinutes);
+        return {
+          status: "LATE",
+          requiresLateReason,
+          lateMinutes,
+          lateReasonStatus: requiresLateReason ? "PENDING" : null,
+        };
       }
-      return "PRESENT";
+      return { status: "PRESENT", requiresLateReason: false, lateMinutes: 0, lateReasonStatus: null };
     } catch (e) {
       console.warn("determineAttendanceStatus error:", e.message);
-      return "PRESENT";
+      return { status: "PRESENT", requiresLateReason: false, lateMinutes: 0, lateReasonStatus: null };
     }
   }
 
@@ -2410,7 +2421,7 @@ function createDevicesRouter(prisma) {
 
         if (!existingAtt) {
           // First punch of the day (Face scan or Fingerprint) -> Check in with shift/grace calculation!
-          const attStatus = await determineAttendanceStatus(organizationId, userRec.id, punchDate);
+          const attEval = await determineAttendanceStatus(organizationId, userRec.id, punchDate);
           await prisma.attendance.create({
             data: {
               organizationId,
@@ -2418,7 +2429,8 @@ function createDevicesRouter(prisma) {
               date: dayUtcMidnight,
               checkInTime: punchDate,
               currentState: "CHECKED_IN",
-              status: attStatus,
+              status: attEval.status,
+              lateReasonStatus: attEval.lateReasonStatus,
               ipAddress: device.ipAddress,
               punchInDeviceType: "BIOMETRIC_TERMINAL",
               punchInAddress: device.locationName,
@@ -2664,7 +2676,7 @@ function createDevicesRouter(prisma) {
       });
 
       if (!existingAttendance) {
-        const attStatus = await determineAttendanceStatus(device.organizationId, user.id, punchDate);
+        const attEval = await determineAttendanceStatus(device.organizationId, user.id, punchDate);
         await prisma.attendance.create({
           data: {
             organizationId: device.organizationId,
@@ -2672,7 +2684,8 @@ function createDevicesRouter(prisma) {
             date: utcMidnightToday,
             checkInTime: punchDate,
             currentState: "CHECKED_IN",
-            status: attStatus,
+            status: attEval.status,
+            lateReasonStatus: attEval.lateReasonStatus,
             ipAddress: device.ipAddress || "BIOMETRIC_HARDWARE",
             punchInDeviceType: "BIOMETRIC_TERMINAL",
             punchInAddress: device.locationName,
@@ -3007,7 +3020,7 @@ function createDevicesRouter(prisma) {
           }
 
           if (!existingAtt) {
-            const attStatus = await determineAttendanceStatus(dev.organizationId, userRec.id, punchDate);
+            const attEval = await determineAttendanceStatus(dev.organizationId, userRec.id, punchDate);
             await prisma.attendance.create({
               data: {
                 organizationId: dev.organizationId,
@@ -3015,7 +3028,8 @@ function createDevicesRouter(prisma) {
                 date: dayUtcMidnight,
                 checkInTime: punchDate,
                 currentState: "CHECKED_IN",
-                status: attStatus,
+                status: attEval.status,
+                lateReasonStatus: attEval.lateReasonStatus,
                 ipAddress: dev.ipAddress,
                 punchInDeviceType: "BIOMETRIC_TERMINAL",
                 punchInAddress: dev.locationName || "Main Gate",
