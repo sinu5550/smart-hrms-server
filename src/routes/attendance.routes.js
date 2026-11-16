@@ -1216,10 +1216,10 @@ function createAttendanceRouter(prisma) {
       const totalHours = Math.floor(totalWorkMinutes / 60);
       const totalHoursFormatted = totalHours > 0 ? `${totalHours}h` : `${totalWorkMinutes}m`;
 
-      // Calculate Extra / Less Duty Balance for individual report
+      // Calculate Extra / Less Duty Balance for individual report (Option 1: Total Actual Work - Expected Duty)
       // Expected duty = officeDays * shiftDutyMins
       const expectedDutyMinutes = officeDays * shiftDutyMins;
-      const balanceMinutes = totalWorkMinutes + totalOvertimeMinutes - expectedDutyMinutes;
+      const balanceMinutes = totalWorkMinutes - expectedDutyMinutes;
       const isNegative = balanceMinutes < 0;
       const absBal = Math.abs(Math.round(balanceMinutes));
       const extraLessBalanceFormatted = `${isNegative ? "-" : "+"}${Math.floor(absBal / 60)}h ${absBal % 60}m`;
@@ -1568,8 +1568,8 @@ function createAttendanceRouter(prisma) {
         // Expected duty minutes = officeDays * shiftDutyMins
         expectedDutyMinutes = officeDays * shiftDutyMins;
 
-        // Extra / Less Duty Balance in minutes = actualDutyMinutes + overtimeDutyMinutes - expectedDutyMinutes
-        const balanceMinutes = actualDutyMinutes + overtimeDutyMinutes - expectedDutyMinutes;
+        // Extra / Less Duty Balance in minutes = actualDutyMinutes - expectedDutyMinutes (Option 1)
+        const balanceMinutes = actualDutyMinutes - expectedDutyMinutes;
 
         return {
           serialNo: index + 1,
