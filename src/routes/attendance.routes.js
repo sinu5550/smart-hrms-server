@@ -1506,8 +1506,25 @@ function createAttendanceRouter(prisma) {
             const workMins = attRecord.checkOutTime ? (attRecord.totalWorkMinutes || 0) : 0;
             actualDutyMinutes += workMins;
 
-            // Overtime
-            const otMins = attRecord.overtimeMinutes || 0;
+            // Dynamically compute Overtime based on running shift!
+            let otMins = 0;
+            if (attRecord.checkOutTime && empShift?.endTime) {
+              const [endH, endM] = empShift.endTime.split(":").map(Number);
+              let sEndMins = endH * 60 + endM;
+              const threshold = typeof empShift.overtimeThresholdMins === "number" ? empShift.overtimeThresholdMins : 30;
+              if (sEndMins < shiftStartMins) sEndMins += 24 * 60;
+
+              const cOut = new Date(attRecord.checkOutTime);
+              let cOutMins = ((cOut.getUTCHours() + 6) % 24) * 60 + cOut.getUTCMinutes();
+              if (sEndMins >= 24 * 60 && cOutMins < shiftStartMins) cOutMins += 24 * 60;
+
+              if (cOutMins > sEndMins + threshold) {
+                otMins = cOutMins - sEndMins;
+              }
+            } else {
+              otMins = attRecord.overtimeMinutes || 0;
+            }
+
             if (otMins > 0) {
               overtimeDutyMinutes += otMins;
               overtimeDaysCount++;
