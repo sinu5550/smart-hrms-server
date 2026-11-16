@@ -838,10 +838,18 @@ function createAttendanceRouter(prisma) {
 
   // GET /api/attendance/admin/individual-report
   // Generates complete single-employee attendance breakdown with daily history, stats, and metadata
-  router.get("/admin/individual-report", requireRoles("HR", "ADMIN"), async (req, res, next) => {
+  // Also accessible by employees viewing their own reports (or HR/ADMIN viewing any)
+  router.get("/admin/individual-report", async (req, res, next) => {
     try {
-      const { userId, month, startDate: qStartDate, endDate: qEndDate } = req.query;
+      let { userId, month, startDate: qStartDate, endDate: qEndDate } = req.query;
       const organizationId = req.user.organizationId;
+      const callerRole = req.user.role;
+      const callerId = req.user.userId;
+
+      // If called by normal EMPLOYEE, force userId to caller's own id for strict security
+      if (callerRole === "EMPLOYEE") {
+        userId = callerId;
+      }
 
       if (!userId) {
         return res.status(400).json({ message: "userId query parameter is required." });
