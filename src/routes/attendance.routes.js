@@ -129,27 +129,19 @@ function createAttendanceRouter(prisma) {
         // Overnight shift (e.g. 20:00 to 05:00)
         shiftEndMins += 24 * 60;
       }
-      const requiredDutyMinutes = Math.max(60, shiftEndMins - shiftStartMins);
 
-      // Rule A: Employee MUST fulfill required duty duration first!
-      if (typeof totalWorkMinutes === "number" && totalWorkMinutes < requiredDutyMinutes) {
-        return 0;
-      }
-
-      // Rule B: Overtime calculated only for duration beyond shift duty hours minus threshold buffer
-      if (typeof totalWorkMinutes === "number") {
-        const extraMinutes = totalWorkMinutes - requiredDutyMinutes;
-        // If extra work exceeds buffer (e.g. 40 mins extra with 30 min buffer), overtime is 40 - 30 = 10 mins!
-        if (extraMinutes > thresholdMins) {
-          return extraMinutes - thresholdMins;
-        }
-        return 0;
-      }
-
+      // Check-out time in Bangladesh time (+06:00)
       const localCheckOut = new Date(checkOutDate.getTime() + 6 * 60 * 60 * 1000);
-      const checkOutMins = localCheckOut.getUTCHours() * 60 + localCheckOut.getUTCMinutes();
+      let checkOutMins = localCheckOut.getUTCHours() * 60 + localCheckOut.getUTCMinutes();
+      if (shiftEndMins >= 24 * 60 && checkOutMins < shiftStartMins) {
+        checkOutMins += 24 * 60;
+      }
+
+      // Overtime Rule: Counted only when checkout occurs AFTER shiftEnd + buffer threshold (e.g. after 6:30 for 6:00 end + 30 min buffer)
+      // Overtime minutes = minutes worked past shift end (e.g., 6:40 checkout = 40 mins overtime, or 10 mins beyond buffer)
+      // Standard rule: Once buffer is crossed (> shiftEndMins + thresholdMins), overtime is counted past shift end:
       if (checkOutMins > shiftEndMins + thresholdMins) {
-        return checkOutMins - shiftEndMins - thresholdMins;
+        return checkOutMins - shiftEndMins;
       }
       return 0;
     } catch (e) {
@@ -819,6 +811,19 @@ function createAttendanceRouter(prisma) {
               fullName: true,
               email: true,
               avatarUrl: true,
+              attendanceExempt: true,
+              role: true,
+              shiftId: true,
+              rosterOffDays: true,
+              shift: {
+                select: {
+                  id: true,
+                  shiftName: true,
+                  startTime: true,
+                  endTime: true,
+                  gracePeriodMinutes: true,
+                },
+              },
               department: { select: { id: true, name: true } },
               designation: { select: { id: true, name: true } },
             },
@@ -830,7 +835,44 @@ function createAttendanceRouter(prisma) {
         orderBy: [{ date: "desc" }, { checkInTime: "asc" }],
       });
 
-      return res.status(200).json(records);
+      // Default org shift fallback
+      const defaultOrgShift = await prisma.officeSetting.findFirst({
+        where: { organizationId: req.user.organizationId, isDefault: true },
+      }) || await prisma.officeSetting.findFirst({ where: { organizationId: req.user.organizationId } });
+
+      // Dynamically recompute status and delay based on employee's current active shift
+      const evaluatedRecords = records.map((rec) => {
+        if (rec.user?.attendanceExempt || rec.user?.role === "OWNER") {
+          return { ...rec, status: "PRESENT", delayMinutes: 0 };
+        }
+
+        const shift = rec.user?.shift || defaultOrgShift;
+        if (!shift?.startTime) {
+          return rec;
+        }
+
+        const [sh, sm] = shift.startTime.split(":").map(Number);
+        const shiftStartMins = sh * 60 + sm;
+        const grace = shift.gracePeriodMinutes ?? 30;
+
+        const checkIn = new Date(rec.checkInTime);
+        const checkInMins = ((checkIn.getUTCHours() + 6) % 24) * 60 + checkIn.getUTCMinutes();
+        const delay = checkInMins - shiftStartMins;
+
+        // If late reason was rejected by HR, status remains ABSENT
+        if (rec.lateReasonStatus === "REJECTED") {
+          return { ...rec, status: "ABSENT", delayMinutes: Math.max(0, delay) };
+        }
+
+        const dynamicStatus = delay > grace ? "LATE" : "PRESENT";
+        return {
+          ...rec,
+          status: dynamicStatus,
+          delayMinutes: Math.max(0, delay),
+        };
+      });
+
+      return res.status(200).json(evaluatedRecords);
     } catch (err) {
       next(err);
     }
@@ -990,6 +1032,22 @@ function createAttendanceRouter(prisma) {
       const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       const fullMonthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
+      // Calculate expected daily duty hours from running shift
+      let shiftDutyMins = 8 * 60; // 8 hours default (480 mins)
+      let shiftStartMins = 9 * 60;
+      let shiftGrace = 30;
+
+      if (empShift?.startTime && empShift?.endTime) {
+        const [sh, sm] = empShift.startTime.split(":").map(Number);
+        const [eh, em] = empShift.endTime.split(":").map(Number);
+        let diff = (eh * 60 + em) - (sh * 60 + sm);
+        if (diff <= 0) diff += 24 * 60; // overnight shift
+        shiftDutyMins = Math.max(60, diff);
+        shiftStartMins = sh * 60 + sm;
+        shiftGrace = empShift.gracePeriodMinutes ?? 30;
+      }
+
+      let officeDays = 0;
       let presentCount = 0;
       let absentCount = 0;
       let lateCount = 0;
@@ -1025,19 +1083,53 @@ function createAttendanceRouter(prisma) {
         let workMins = 0;
         let otMins = 0;
 
+        // Is this an authorized off day (weekend, official holiday, or approved leave)
+        const isOffDay = isWeekend || isHoliday || hasLeave;
+
+        if (!isOffDay && !isFuture) {
+          officeDays++;
+        }
+
         if (hasLeave) {
           status = "Leave";
           leaveCount++;
         } else if (att) {
-          status = att.status === "LATE" ? "Late" : "Present";
-          if (status === "Late") lateCount++;
-          presentCount++;
           checkIn = formatTime12h(att.checkInTime);
           checkOut = formatTime12h(att.checkOutTime);
           workMins = att.totalWorkMinutes || 0;
           otMins = att.overtimeMinutes || 0;
           totalWorkMinutes += workMins;
           totalOvertimeMinutes += otMins;
+
+          if (isWeekend) {
+            // User requirement: If employee works on off day, explicitly show Off-Day (Duty)
+            status = "Off-Day";
+            offDayCount++;
+          } else if (isHoliday) {
+            status = "Holiday";
+            holidayCount++;
+          } else {
+            // Evaluated dynamically against employee's running shift!
+            if (user.attendanceExempt || user.role === "OWNER") {
+              status = "Present";
+            } else if (att.lateReasonStatus === "REJECTED") {
+              status = "Absent";
+              absentCount++;
+            } else {
+              const punchIn = new Date(att.checkInTime);
+              const punchMins = ((punchIn.getUTCHours() + 6) % 24) * 60 + punchIn.getUTCMinutes();
+              const delay = punchMins - shiftStartMins;
+              if (delay > shiftGrace) {
+                status = "Late";
+                lateCount++;
+              } else {
+                status = "Present";
+              }
+            }
+            if (status !== "Absent") {
+              presentCount++;
+            }
+          }
         } else if (isHoliday) {
           status = "Holiday";
           holidayCount++;
@@ -1082,6 +1174,15 @@ function createAttendanceRouter(prisma) {
       const totalHours = Math.floor(totalWorkMinutes / 60);
       const totalHoursFormatted = totalHours > 0 ? `${totalHours}h` : `${totalWorkMinutes}m`;
 
+      // Calculate Extra / Less Duty Balance for individual report
+      // Expected duty = officeDays * shiftDutyMins
+      const expectedDutyMinutes = officeDays * shiftDutyMins;
+      const balanceMinutes = totalWorkMinutes + totalOvertimeMinutes - expectedDutyMinutes;
+      const isNegative = balanceMinutes < 0;
+      const absBal = Math.abs(Math.round(balanceMinutes));
+      const extraLessBalanceFormatted = `${isNegative ? "-" : "+"}${Math.floor(absBal / 60)}h ${absBal % 60}m`;
+      const expectedDutyFormatted = `${Math.floor(expectedDutyMinutes / 60)}h ${expectedDutyMinutes % 60}m`;
+
       return res.status(200).json({
         success: true,
         employee: {
@@ -1116,6 +1217,10 @@ function createAttendanceRouter(prisma) {
           totalWorkHours: totalHoursFormatted,
           totalWorkMinutes,
           totalOvertimeMinutes,
+          expectedDutyMinutes,
+          expectedDutyFormatted,
+          balanceMinutes,
+          extraLessBalanceFormatted,
         },
         dailyHistory,
       });
@@ -1355,11 +1460,6 @@ function createAttendanceRouter(prisma) {
           if (hasLeave) {
             leaveCount++;
           } else if (attRecord) {
-            presentCount++;
-            if (attRecord.status === "LATE") {
-              lateCount++;
-            }
-
             // Actual work minutes
             const workMins = attRecord.checkOutTime ? (attRecord.totalWorkMinutes || 0) : 0;
             actualDutyMinutes += workMins;
@@ -1371,16 +1471,30 @@ function createAttendanceRouter(prisma) {
               overtimeDaysCount++;
             }
 
-            // Delay computation
-            if (attRecord.checkInTime) {
-              const punchIn = new Date(attRecord.checkInTime);
-              const punchMins = ((punchIn.getUTCHours() + 6) % 24) * 60 + punchIn.getUTCMinutes();
-              const delay = punchMins - shiftStartMins;
-              if (delay > shiftGrace) {
-                totalDelayMinutes += delay;
-                // If delay exceeds 60 minutes beyond grace period, catalog as Extreme Delay
-                if (delay >= shiftGrace + 60) {
-                  extremeDelayCount++;
+            if (isWeekend) {
+              // Working on designated off-day: not late, but accounted as duty
+            } else if (isHoliday) {
+              // Working on holiday
+            } else {
+              // Evaluated dynamically against employee's active shift
+              if (emp.attendanceExempt || emp.role === "OWNER") {
+                presentCount++;
+              } else if (attRecord.lateReasonStatus === "REJECTED") {
+                absentCount++;
+              } else {
+                presentCount++;
+                if (attRecord.checkInTime) {
+                  const punchIn = new Date(attRecord.checkInTime);
+                  const punchMins = ((punchIn.getUTCHours() + 6) % 24) * 60 + punchIn.getUTCMinutes();
+                  const delay = punchMins - shiftStartMins;
+                  if (delay > shiftGrace) {
+                    lateCount++;
+                    totalDelayMinutes += delay;
+                    // If delay exceeds 60 minutes beyond grace period, catalog as Extreme Delay
+                    if (delay >= shiftGrace + 60) {
+                      extremeDelayCount++;
+                    }
+                  }
                 }
               }
             }

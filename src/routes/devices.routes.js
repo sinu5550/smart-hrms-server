@@ -525,31 +525,17 @@ function createDevicesRouter(prisma) {
         // Overnight shift (e.g., 20:00 to 05:00)
         shiftEndMins += 24 * 60;
       }
-      const requiredDutyMinutes = Math.max(60, shiftEndMins - shiftStartMins);
 
-      // Rule A: If totalWorkMinutes is provided, employee MUST fulfill required duty duration first!
-      if (typeof totalWorkMinutes === "number" && totalWorkMinutes < requiredDutyMinutes) {
-        return 0;
-      }
-
-      // Rule B: Calculate minutes beyond the shift duration / checkout threshold
       // Convert checkOutDate to local hours/minutes (+06:00)
       const checkOut = new Date(checkOutDate);
-      const checkOutMins = ((checkOut.getUTCHours() + 6) % 24) * 60 + checkOut.getUTCMinutes();
-
-      // Effective duty minutes worked beyond required hours minus threshold buffer
-      if (typeof totalWorkMinutes === "number") {
-        const extraMinutes = totalWorkMinutes - requiredDutyMinutes;
-        // If extra work exceeds buffer (e.g. 40 mins extra with 30 min buffer), overtime is 40 - 30 = 10 mins!
-        if (extraMinutes > thresholdMins) {
-          return extraMinutes - thresholdMins;
-        }
-        return 0;
+      let checkOutMins = ((checkOut.getUTCHours() + 6) % 24) * 60 + checkOut.getUTCMinutes();
+      if (shiftEndMins >= 24 * 60 && checkOutMins < shiftStartMins) {
+        checkOutMins += 24 * 60;
       }
 
-      // Fallback: If totalWorkMinutes not provided, check against wall-clock shift end
+      // Overtime Rule: Counted only when checkout occurs AFTER shiftEnd + buffer threshold (e.g. after 6:30 for 6:00 end + 30 min buffer)
       if (checkOutMins > shiftEndMins + thresholdMins) {
-        return checkOutMins - shiftEndMins - thresholdMins;
+        return checkOutMins - shiftEndMins;
       }
       return 0;
     } catch (e) {
