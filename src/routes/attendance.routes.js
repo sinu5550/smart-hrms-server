@@ -865,10 +865,31 @@ function createAttendanceRouter(prisma) {
         }
 
         const dynamicStatus = delay > grace ? "LATE" : "PRESENT";
+
+        // Dynamically calculate overtime based on running shift
+        let dynamicOvertime = rec.overtimeMinutes || 0;
+        if (rec.checkOutTime && shift?.endTime) {
+          const [endH, endM] = shift.endTime.split(":").map(Number);
+          let sEndMins = endH * 60 + endM;
+          const threshold = typeof shift.overtimeThresholdMins === "number" ? shift.overtimeThresholdMins : 30;
+          if (sEndMins < shiftStartMins) sEndMins += 24 * 60;
+
+          const cOut = new Date(rec.checkOutTime);
+          let cOutMins = ((cOut.getUTCHours() + 6) % 24) * 60 + cOut.getUTCMinutes();
+          if (sEndMins >= 24 * 60 && cOutMins < shiftStartMins) cOutMins += 24 * 60;
+
+          if (cOutMins > sEndMins + threshold) {
+            dynamicOvertime = cOutMins - sEndMins;
+          } else {
+            dynamicOvertime = 0;
+          }
+        }
+
         return {
           ...rec,
           status: dynamicStatus,
           delayMinutes: Math.max(0, delay),
+          overtimeMinutes: dynamicOvertime,
         };
       });
 
@@ -1097,7 +1118,28 @@ function createAttendanceRouter(prisma) {
           checkIn = formatTime12h(att.checkInTime);
           checkOut = formatTime12h(att.checkOutTime);
           workMins = att.totalWorkMinutes || 0;
-          otMins = att.overtimeMinutes || 0;
+
+          // Dynamically compute overtime against running shift!
+          // Shift end + buffer threshold
+          if (att.checkOutTime && empShift?.endTime) {
+            const [endH, endM] = empShift.endTime.split(":").map(Number);
+            let sEndMins = endH * 60 + endM;
+            const threshold = typeof empShift.overtimeThresholdMins === "number" ? empShift.overtimeThresholdMins : 30;
+            if (sEndMins < shiftStartMins) sEndMins += 24 * 60;
+
+            const cOut = new Date(att.checkOutTime);
+            let cOutMins = ((cOut.getUTCHours() + 6) % 24) * 60 + cOut.getUTCMinutes();
+            if (sEndMins >= 24 * 60 && cOutMins < shiftStartMins) cOutMins += 24 * 60;
+
+            if (cOutMins > sEndMins + threshold) {
+              otMins = cOutMins - sEndMins;
+            } else {
+              otMins = 0;
+            }
+          } else {
+            otMins = att.overtimeMinutes || 0;
+          }
+
           totalWorkMinutes += workMins;
           totalOvertimeMinutes += otMins;
 
