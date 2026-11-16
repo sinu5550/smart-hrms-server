@@ -743,35 +743,48 @@ function createAttendanceRouter(prisma) {
       const [y, m, d] = date.split("-").map(Number);
       const attendanceDate = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
 
-      // Parse checkIn and checkOut dates if provided
-      // If checkInTime is given as "10:00" or ISO string:
-      let parsedCheckIn = null;
-      let parsedCheckOut = null;
+      // Robust time parser supporting "10:13 AM", "07:31 PM", "19:30", "10:13", or ISO strings
+      const parseTimeStringToDate = (timeStr, baseDayOffset = 0) => {
+        if (!timeStr || typeof timeStr !== "string") return null;
+        const trimmed = timeStr.trim();
+        if (!trimmed || trimmed === "—" || trimmed === "-") return null;
 
-      if (checkInTime) {
-        if (checkInTime.includes("T")) {
-          parsedCheckIn = new Date(checkInTime);
-        } else {
-          // HH:MM in BD time (+06:00)
-          const [h, min] = checkInTime.split(":").map(Number);
-          parsedCheckIn = new Date(Date.UTC(y, m - 1, d, h - 6, min, 0, 0));
+        // ISO format (e.g., 2026-11-02T10:13:00.000Z)
+        if (trimmed.includes("T")) {
+          const parsed = new Date(trimmed);
+          return isNaN(parsed.getTime()) ? null : parsed;
         }
-      }
 
-      if (checkOutTime) {
-        if (checkOutTime.includes("T")) {
-          parsedCheckOut = new Date(checkOutTime);
-        } else {
-          const [h, min] = checkOutTime.split(":").map(Number);
-          // If overnight check-out is smaller than check-in, advance to next day
-          let dayOffset = 0;
-          if (parsedCheckIn) {
-            const inTotal = ((parsedCheckIn.getUTCHours() + 6) % 24) * 60 + parsedCheckIn.getUTCMinutes();
-            const outTotal = h * 60 + min;
-            if (outTotal < inTotal) dayOffset = 1;
+        // Match 12-hour (e.g. "10:13 AM", "07:31 PM") or 24-hour (e.g. "19:31", "10:13")
+        const match = trimmed.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?$/i);
+        if (match) {
+          let hours = parseInt(match[1], 10);
+          const minutes = parseInt(match[2], 10);
+          const meridiem = match[3] ? match[3].toUpperCase() : null;
+
+          if (meridiem === "PM" && hours < 12) {
+            hours += 12;
+          } else if (meridiem === "AM" && hours === 12) {
+            hours = 0;
           }
-          parsedCheckOut = new Date(Date.UTC(y, m - 1, d + dayOffset, h - 6, min, 0, 0));
+
+          // Bangladesh time is UTC+6 -> UTC hour = hours - 6
+          const dt = new Date(Date.UTC(y, m - 1, d + baseDayOffset, hours - 6, minutes, 0, 0));
+          return isNaN(dt.getTime()) ? null : dt;
         }
+
+        // Fallback standard Date parse
+        const fallback = new Date(`${date}T${trimmed}`);
+        return isNaN(fallback.getTime()) ? null : fallback;
+      };
+
+      // Parse checkIn and checkOut dates if provided
+      let parsedCheckIn = parseTimeStringToDate(checkInTime);
+      let parsedCheckOut = parseTimeStringToDate(checkOutTime);
+
+      // If overnight check-out is before check-in, advance checkout to next calendar day
+      if (parsedCheckIn && parsedCheckOut && parsedCheckOut < parsedCheckIn) {
+        parsedCheckOut = parseTimeStringToDate(checkOutTime, 1);
       }
 
       // Calculate shift status and overtime
