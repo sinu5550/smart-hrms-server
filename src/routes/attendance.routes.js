@@ -1,6 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
-const { authenticateToken, requireRoles, officeIpGuard, resolveClientIp } = require("../middleware");
+const { authenticateToken, requireRoles, requirePermissions, officeIpGuard, resolveClientIp } = require("../middleware");
 
 function createAttendanceRouter(prisma) {
   const router = express.Router();
@@ -709,6 +709,143 @@ function createAttendanceRouter(prisma) {
         success: true,
         message: action === "APPROVE" ? "Late reason approved. Attendance is counted." : "Late reason rejected. Attendance marked as absent.",
         attendance: updated,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/attendance/admin/manual-punch
+  // Allows authorized HR / Admin (attendance.manage permission) to create or edit manual check-in / check-out
+  router.post("/admin/manual-punch", requirePermissions(prisma, "attendance.manage"), async (req, res, next) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { userId, date, checkInTime, checkOutTime, note } = req.body || {};
+
+      if (!userId || !date) {
+        return res.status(400).json({ message: "userId and date are required." });
+      }
+
+      if (!checkInTime && !checkOutTime) {
+        return res.status(400).json({ message: "At least checkInTime or checkOutTime must be provided." });
+      }
+
+      const targetUser = await prisma.user.findFirst({
+        where: { id: userId, organizationId, isDeleted: false },
+        select: { id: true, fullName: true, shiftId: true, attendanceExempt: true, role: true },
+      });
+
+      if (!targetUser) {
+        return res.status(404).json({ message: "Employee not found." });
+      }
+
+      // Convert date string YYYY-MM-DD to UTC midnight date
+      const [y, m, d] = date.split("-").map(Number);
+      const attendanceDate = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+
+      // Parse checkIn and checkOut dates if provided
+      // If checkInTime is given as "10:00" or ISO string:
+      let parsedCheckIn = null;
+      let parsedCheckOut = null;
+
+      if (checkInTime) {
+        if (checkInTime.includes("T")) {
+          parsedCheckIn = new Date(checkInTime);
+        } else {
+          // HH:MM in BD time (+06:00)
+          const [h, min] = checkInTime.split(":").map(Number);
+          parsedCheckIn = new Date(Date.UTC(y, m - 1, d, h - 6, min, 0, 0));
+        }
+      }
+
+      if (checkOutTime) {
+        if (checkOutTime.includes("T")) {
+          parsedCheckOut = new Date(checkOutTime);
+        } else {
+          const [h, min] = checkOutTime.split(":").map(Number);
+          // If overnight check-out is smaller than check-in, advance to next day
+          let dayOffset = 0;
+          if (parsedCheckIn) {
+            const inTotal = ((parsedCheckIn.getUTCHours() + 6) % 24) * 60 + parsedCheckIn.getUTCMinutes();
+            const outTotal = h * 60 + min;
+            if (outTotal < inTotal) dayOffset = 1;
+          }
+          parsedCheckOut = new Date(Date.UTC(y, m - 1, d + dayOffset, h - 6, min, 0, 0));
+        }
+      }
+
+      // Calculate shift status and overtime
+      let shiftStatus = "PRESENT";
+      let totalWorkMinutes = 0;
+      let overtimeMinutes = 0;
+
+      if (parsedCheckIn) {
+        const statusCalc = await calculateShiftStatus(organizationId, targetUser.id, parsedCheckIn);
+        shiftStatus = statusCalc.status;
+      }
+
+      if (parsedCheckIn && parsedCheckOut) {
+        totalWorkMinutes = Math.max(0, Math.round((parsedCheckOut.getTime() - parsedCheckIn.getTime()) / (1000 * 60)));
+        overtimeMinutes = await calculateOvertimeMinutes(organizationId, targetUser.id, parsedCheckOut, totalWorkMinutes);
+      }
+
+      // Upsert attendance record for targetUser on attendanceDate
+      const existing = await prisma.attendance.findUnique({
+        where: { userId_date: { userId: targetUser.id, date: attendanceDate } },
+      });
+
+      let savedRecord;
+      if (existing) {
+        const updateData = {
+          updatedAt: new Date(),
+        };
+        if (parsedCheckIn) updateData.checkInTime = parsedCheckIn;
+        if (parsedCheckOut) {
+          updateData.checkOutTime = parsedCheckOut;
+          updateData.currentState = "CHECKED_OUT";
+        } else if (!existing.checkOutTime) {
+          updateData.currentState = "CHECKED_IN";
+        }
+        if (parsedCheckIn && (parsedCheckOut || existing.checkOutTime)) {
+          const effOut = parsedCheckOut || existing.checkOutTime;
+          totalWorkMinutes = Math.max(0, Math.round((effOut.getTime() - parsedCheckIn.getTime()) / (1000 * 60)));
+          updateData.totalWorkMinutes = totalWorkMinutes;
+          updateData.overtimeMinutes = await calculateOvertimeMinutes(organizationId, targetUser.id, effOut, totalWorkMinutes);
+        }
+        if (shiftStatus) updateData.status = shiftStatus;
+        if (note) updateData.punchInAddress = `Manual Adjustment: ${note.trim()}`;
+
+        savedRecord = await prisma.attendance.update({
+          where: { id: existing.id },
+          data: updateData,
+          include: {
+            user: { select: { id: true, fullName: true, employeeId: true } },
+          },
+        });
+      } else {
+        savedRecord = await prisma.attendance.create({
+          data: {
+            organizationId,
+            userId: targetUser.id,
+            date: attendanceDate,
+            checkInTime: parsedCheckIn || new Date(Date.UTC(y, m - 1, d, 4, 0, 0, 0)), // fallback 10:00 AM BD
+            checkOutTime: parsedCheckOut || null,
+            currentState: parsedCheckOut ? "CHECKED_OUT" : "CHECKED_IN",
+            status: shiftStatus,
+            totalWorkMinutes,
+            overtimeMinutes,
+            punchInAddress: note ? `Manual Adjustment: ${note.trim()}` : "Manual HR Entry",
+          },
+          include: {
+            user: { select: { id: true, fullName: true, employeeId: true } },
+          },
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Attendance for ${targetUser.fullName} on ${date} saved successfully.`,
+        record: savedRecord,
       });
     } catch (err) {
       next(err);
