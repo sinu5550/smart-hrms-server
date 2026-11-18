@@ -836,6 +836,9 @@ function createAttendanceRouter(prisma) {
           },
         });
       } else {
+        const callerIp = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "127.0.0.1";
+        const normalizedIp = typeof callerIp === "string" ? callerIp.split(",")[0].trim() : "127.0.0.1";
+
         savedRecord = await prisma.attendance.create({
           data: {
             organizationId,
@@ -847,7 +850,9 @@ function createAttendanceRouter(prisma) {
             status: shiftStatus,
             totalWorkMinutes,
             overtimeMinutes,
+            ipAddress: normalizedIp,
             punchInAddress: note ? `Manual Adjustment: ${note.trim()}` : "Manual HR Entry",
+            punchInDeviceType: "MANUAL_ENTRY",
           },
           include: {
             user: { select: { id: true, fullName: true, employeeId: true } },
