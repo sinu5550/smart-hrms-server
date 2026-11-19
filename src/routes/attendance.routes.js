@@ -875,41 +875,10 @@ function createAttendanceRouter(prisma) {
       });
 
       let savedRecord;
-      if (existing) {
-        // If overriding as OFF_DAY or ABSENT and existing record exists without punches, or user explicitly requested
-        if ((statusOverride === "OFF_DAY" || statusOverride === "ABSENT") && !parsedCheckIn && !parsedCheckOut) {
-          if (statusOverride === "OFF_DAY") {
-            // Remove the record so the date naturally falls back to Off-Day / Weekend / Normal schedule
-            await prisma.attendance.delete({ where: { id: existing.id } });
-            return res.status(200).json({
-              success: true,
-              message: `Attendance for ${targetUser.fullName} on ${date} marked as Day-Off.`,
-              record: null,
-            });
-          } else if (statusOverride === "ABSENT") {
-            // Keep record marked as ABSENT with 0 work minutes
-            savedRecord = await prisma.attendance.update({
-              where: { id: existing.id },
-              data: {
-                status: "ABSENT",
-                currentState: "NOT_CHECKED_IN",
-                totalWorkMinutes: 0,
-                overtimeMinutes: 0,
-                punchInAddress: finalNote ? `Manual Adjustment: ${finalNote}` : "Manual HR Entry: Absent",
-                updatedAt: new Date(),
-              },
-              include: {
-                user: { select: { id: true, fullName: true, employeeId: true } },
-              },
-            });
-            return res.status(200).json({
-              success: true,
-              message: `Attendance for ${targetUser.fullName} on ${date} marked as Absent.`,
-              record: savedRecord,
-            });
-          }
-        }
+      const callerIp = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "127.0.0.1";
+      const normalizedIp = typeof callerIp === "string" ? callerIp.split(",")[0].trim() : "127.0.0.1";
 
+      if (existing) {
         const updateData = {
           updatedAt: new Date(),
         };
@@ -926,6 +895,11 @@ function createAttendanceRouter(prisma) {
           updateData.totalWorkMinutes = totalWorkMinutes;
           updateData.overtimeMinutes = await calculateOvertimeMinutes(organizationId, targetUser.id, effOut, totalWorkMinutes);
         }
+        if (statusOverride === "OFF_DAY" && !parsedCheckIn && !parsedCheckOut) {
+          updateData.totalWorkMinutes = 0;
+          updateData.overtimeMinutes = 0;
+          updateData.currentState = "NOT_CHECKED_IN";
+        }
         if (shiftStatus) updateData.status = shiftStatus;
         if (finalNote) updateData.punchInAddress = `Manual Adjustment: ${finalNote}`;
 
@@ -937,23 +911,8 @@ function createAttendanceRouter(prisma) {
           },
         });
       } else {
-        // If there are no check-in/out times:
-        if (!parsedCheckIn && !parsedCheckOut) {
-          if (statusOverride === "OFF_DAY") {
-            // For a day with no prior attendance record, Day-Off is already the natural state (or unpunched).
-            // Nothing needs to be inserted into the database!
-            return res.status(200).json({
-              success: true,
-              message: `Attendance for ${targetUser.fullName} on ${date} marked as Day-Off.`,
-              record: null,
-            });
-          }
-        }
-
-        const callerIp = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "127.0.0.1";
-        const normalizedIp = typeof callerIp === "string" ? callerIp.split(",")[0].trim() : "127.0.0.1";
-
-        // If no check-in time was given (e.g. marking Absent without punch), use UTC noon on that date as non-null dummy checkInTime
+        // When there is no check-in/out time provided (e.g., admin explicitly forces Day-Off or Absent):
+        // Provide a valid non-null placeholder checkInTime at UTC noon of that date
         const fallbackCheckInTime = parsedCheckIn || new Date(Date.UTC(y, m - 1, d, 6, 0, 0, 0));
 
         savedRecord = await prisma.attendance.create({
@@ -1378,9 +1337,9 @@ function createAttendanceRouter(prisma) {
 
         // Check for manual admin override in punchInAddress
         const hasManualOverride = Boolean(att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:"));
-        const overrideOffDay = att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:OFF_DAY]");
-        const overrideAbsent = att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:ABSENT]");
-        const overrideOffDayDuty = att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:OFF_DAY_DUTY]");
+        const overrideOffDay = Boolean(att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:OFF_DAY]"));
+        const overrideAbsent = Boolean(att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:ABSENT]"));
+        const overrideOffDayDuty = Boolean(att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:OFF_DAY_DUTY]"));
 
         // Is this an authorized off day (weekend, official holiday, or approved leave)
         const isOffDay = (isWeekend || isHoliday || hasLeave || overrideOffDay || overrideOffDayDuty) && !overrideAbsent;
@@ -1399,9 +1358,18 @@ function createAttendanceRouter(prisma) {
             checkIn = formatTime12h(att.checkInTime);
             checkOut = formatTime12h(att.checkOutTime);
           }
-        } else if (overrideOffDay && (!att || (!att.checkInTime && !att.checkOutTime))) {
+        } else if (overrideOffDay) {
           status = "Off-Day";
           offDayCount++;
+          if (att) {
+            // If it had real check-in/out times, display them, otherwise leave as —
+            if (att.checkOutTime || (att.punchInDeviceType && att.punchInDeviceType !== "MANUAL_ENTRY")) {
+              checkIn = formatTime12h(att.checkInTime);
+              checkOut = formatTime12h(att.checkOutTime);
+              workMins = att.totalWorkMinutes || 0;
+              totalWorkMinutes += workMins;
+            }
+          }
         } else if (att) {
           checkIn = formatTime12h(att.checkInTime);
           checkOut = formatTime12h(att.checkOutTime);
