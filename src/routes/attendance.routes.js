@@ -898,7 +898,7 @@ function createAttendanceRouter(prisma) {
         if (statusOverride === "OFF_DAY" && !parsedCheckIn && !parsedCheckOut) {
           updateData.totalWorkMinutes = 0;
           updateData.overtimeMinutes = 0;
-          updateData.currentState = "NOT_CHECKED_IN";
+          updateData.currentState = "CHECKED_OUT";
         }
         if (shiftStatus) updateData.status = shiftStatus;
         if (finalNote) updateData.punchInAddress = `Manual Adjustment: ${finalNote}`;
@@ -922,7 +922,7 @@ function createAttendanceRouter(prisma) {
             date: attendanceDate,
             checkInTime: fallbackCheckInTime,
             checkOutTime: parsedCheckOut || null,
-            currentState: parsedCheckOut ? "CHECKED_OUT" : (parsedCheckIn ? "CHECKED_IN" : "NOT_CHECKED_IN"),
+            currentState: "CHECKED_OUT",
             status: shiftStatus,
             totalWorkMinutes,
             overtimeMinutes,
