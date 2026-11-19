@@ -769,17 +769,18 @@ function createAttendanceRouter(prisma) {
 
   // POST /api/attendance/admin/manual-punch
   // Allows authorized HR / Admin (attendance.manage permission) to create or edit manual check-in / check-out
+  // and optionally override status to "OFF_DAY", "ABSENT", "OFF_DAY_DUTY", or "AUTO"
   router.post("/admin/manual-punch", requirePermissions(prisma, "attendance.manage"), async (req, res, next) => {
     try {
       const organizationId = req.user.organizationId;
-      const { userId, date, checkInTime, checkOutTime, note } = req.body || {};
+      const { userId, date, checkInTime, checkOutTime, note, statusOverride } = req.body || {};
 
       if (!userId || !date) {
         return res.status(400).json({ message: "userId and date are required." });
       }
 
-      if (!checkInTime && !checkOutTime) {
-        return res.status(400).json({ message: "At least checkInTime or checkOutTime must be provided." });
+      if (!checkInTime && !checkOutTime && !statusOverride) {
+        return res.status(400).json({ message: "Provide at least Check-In/Check-Out time or a Status Selection." });
       }
 
       const targetUser = await prisma.user.findFirst({
@@ -854,6 +855,20 @@ function createAttendanceRouter(prisma) {
         overtimeMinutes = await calculateOvertimeMinutes(organizationId, targetUser.id, parsedCheckOut, totalWorkMinutes);
       }
 
+      // Handle optional status override tag if provided by admin:
+      // "OFF_DAY", "ABSENT", "OFF_DAY_DUTY"
+      let finalNote = note ? note.trim() : "";
+      if (statusOverride && statusOverride !== "AUTO") {
+        if (statusOverride === "OFF_DAY") {
+          finalNote = `[OVERRIDE:OFF_DAY] ${finalNote}`.trim();
+        } else if (statusOverride === "ABSENT") {
+          finalNote = `[OVERRIDE:ABSENT] ${finalNote}`.trim();
+          shiftStatus = "ABSENT";
+        } else if (statusOverride === "OFF_DAY_DUTY") {
+          finalNote = `[OVERRIDE:OFF_DAY_DUTY] ${finalNote}`.trim();
+        }
+      }
+
       // Upsert attendance record for targetUser on attendanceDate
       const existing = await prisma.attendance.findUnique({
         where: { userId_date: { userId: targetUser.id, date: attendanceDate } },
@@ -868,7 +883,7 @@ function createAttendanceRouter(prisma) {
         if (parsedCheckOut) {
           updateData.checkOutTime = parsedCheckOut;
           updateData.currentState = "CHECKED_OUT";
-        } else if (!existing.checkOutTime) {
+        } else if (!existing.checkOutTime && parsedCheckIn) {
           updateData.currentState = "CHECKED_IN";
         }
         if (parsedCheckIn && (parsedCheckOut || existing.checkOutTime)) {
@@ -878,7 +893,7 @@ function createAttendanceRouter(prisma) {
           updateData.overtimeMinutes = await calculateOvertimeMinutes(organizationId, targetUser.id, effOut, totalWorkMinutes);
         }
         if (shiftStatus) updateData.status = shiftStatus;
-        if (note) updateData.punchInAddress = `Manual Adjustment: ${note.trim()}`;
+        if (finalNote) updateData.punchInAddress = `Manual Adjustment: ${finalNote}`;
 
         savedRecord = await prisma.attendance.update({
           where: { id: existing.id },
@@ -896,14 +911,14 @@ function createAttendanceRouter(prisma) {
             organizationId,
             userId: targetUser.id,
             date: attendanceDate,
-            checkInTime: parsedCheckIn || new Date(Date.UTC(y, m - 1, d, 4, 0, 0, 0)), // fallback 10:00 AM BD
+            checkInTime: parsedCheckIn || (statusOverride === "OFF_DAY" || statusOverride === "ABSENT" ? null : new Date(Date.UTC(y, m - 1, d, 4, 0, 0, 0))),
             checkOutTime: parsedCheckOut || null,
-            currentState: parsedCheckOut ? "CHECKED_OUT" : "CHECKED_IN",
+            currentState: parsedCheckOut ? "CHECKED_OUT" : (parsedCheckIn ? "CHECKED_IN" : "NOT_CHECKED_IN"),
             status: shiftStatus,
             totalWorkMinutes,
             overtimeMinutes,
             ipAddress: normalizedIp,
-            punchInAddress: note ? `Manual Adjustment: ${note.trim()}` : "Manual HR Entry",
+            punchInAddress: finalNote ? `Manual Adjustment: ${finalNote}` : "Manual HR Entry",
             punchInDeviceType: "MANUAL_ENTRY",
           },
           include: {
@@ -1311,8 +1326,14 @@ function createAttendanceRouter(prisma) {
         let workMins = 0;
         let otMins = 0;
 
+        // Check for manual admin override in punchInAddress
+        const hasManualOverride = Boolean(att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:"));
+        const overrideOffDay = att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:OFF_DAY]");
+        const overrideAbsent = att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:ABSENT]");
+        const overrideOffDayDuty = att?.punchInAddress && att.punchInAddress.includes("[OVERRIDE:OFF_DAY_DUTY]");
+
         // Is this an authorized off day (weekend, official holiday, or approved leave)
-        const isOffDay = isWeekend || isHoliday || hasLeave;
+        const isOffDay = (isWeekend || isHoliday || hasLeave || overrideOffDay || overrideOffDayDuty) && !overrideAbsent;
 
         if (!isOffDay && !isFuture) {
           officeDays++;
@@ -1321,6 +1342,16 @@ function createAttendanceRouter(prisma) {
         if (hasLeave) {
           status = "Leave";
           leaveCount++;
+        } else if (overrideAbsent) {
+          status = "Absent";
+          absentCount++;
+          if (att) {
+            checkIn = formatTime12h(att.checkInTime);
+            checkOut = formatTime12h(att.checkOutTime);
+          }
+        } else if (overrideOffDay && (!att || (!att.checkInTime && !att.checkOutTime))) {
+          status = "Off-Day";
+          offDayCount++;
         } else if (att) {
           checkIn = formatTime12h(att.checkInTime);
           checkOut = formatTime12h(att.checkOutTime);
@@ -1350,7 +1381,7 @@ function createAttendanceRouter(prisma) {
           totalWorkMinutes += workMins;
           totalOvertimeMinutes += otMins;
 
-          if (isWeekend) {
+          if (isWeekend || overrideOffDay || overrideOffDayDuty) {
             // User requirement: If employee works on off day, explicitly show Off-Day (Duty)
             status = "Off-Day";
             offDayCount++;
@@ -1382,7 +1413,7 @@ function createAttendanceRouter(prisma) {
         } else if (isHoliday) {
           status = "Holiday";
           holidayCount++;
-        } else if (isWeekend) {
+        } else if (isWeekend || overrideOffDay || overrideOffDayDuty) {
           status = "Off-Day";
           offDayCount++;
         } else if (isFuture) {
