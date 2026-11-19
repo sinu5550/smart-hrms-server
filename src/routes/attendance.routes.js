@@ -876,6 +876,40 @@ function createAttendanceRouter(prisma) {
 
       let savedRecord;
       if (existing) {
+        // If overriding as OFF_DAY or ABSENT and existing record exists without punches, or user explicitly requested
+        if ((statusOverride === "OFF_DAY" || statusOverride === "ABSENT") && !parsedCheckIn && !parsedCheckOut) {
+          if (statusOverride === "OFF_DAY") {
+            // Remove the record so the date naturally falls back to Off-Day / Weekend / Normal schedule
+            await prisma.attendance.delete({ where: { id: existing.id } });
+            return res.status(200).json({
+              success: true,
+              message: `Attendance for ${targetUser.fullName} on ${date} marked as Day-Off.`,
+              record: null,
+            });
+          } else if (statusOverride === "ABSENT") {
+            // Keep record marked as ABSENT with 0 work minutes
+            savedRecord = await prisma.attendance.update({
+              where: { id: existing.id },
+              data: {
+                status: "ABSENT",
+                currentState: "NOT_CHECKED_IN",
+                totalWorkMinutes: 0,
+                overtimeMinutes: 0,
+                punchInAddress: finalNote ? `Manual Adjustment: ${finalNote}` : "Manual HR Entry: Absent",
+                updatedAt: new Date(),
+              },
+              include: {
+                user: { select: { id: true, fullName: true, employeeId: true } },
+              },
+            });
+            return res.status(200).json({
+              success: true,
+              message: `Attendance for ${targetUser.fullName} on ${date} marked as Absent.`,
+              record: savedRecord,
+            });
+          }
+        }
+
         const updateData = {
           updatedAt: new Date(),
         };
@@ -903,15 +937,31 @@ function createAttendanceRouter(prisma) {
           },
         });
       } else {
+        // If there are no check-in/out times:
+        if (!parsedCheckIn && !parsedCheckOut) {
+          if (statusOverride === "OFF_DAY") {
+            // For a day with no prior attendance record, Day-Off is already the natural state (or unpunched).
+            // Nothing needs to be inserted into the database!
+            return res.status(200).json({
+              success: true,
+              message: `Attendance for ${targetUser.fullName} on ${date} marked as Day-Off.`,
+              record: null,
+            });
+          }
+        }
+
         const callerIp = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "127.0.0.1";
         const normalizedIp = typeof callerIp === "string" ? callerIp.split(",")[0].trim() : "127.0.0.1";
+
+        // If no check-in time was given (e.g. marking Absent without punch), use UTC noon on that date as non-null dummy checkInTime
+        const fallbackCheckInTime = parsedCheckIn || new Date(Date.UTC(y, m - 1, d, 6, 0, 0, 0));
 
         savedRecord = await prisma.attendance.create({
           data: {
             organizationId,
             userId: targetUser.id,
             date: attendanceDate,
-            checkInTime: parsedCheckIn || (statusOverride === "OFF_DAY" || statusOverride === "ABSENT" ? null : new Date(Date.UTC(y, m - 1, d, 4, 0, 0, 0))),
+            checkInTime: fallbackCheckInTime,
             checkOutTime: parsedCheckOut || null,
             currentState: parsedCheckOut ? "CHECKED_OUT" : (parsedCheckIn ? "CHECKED_IN" : "NOT_CHECKED_IN"),
             status: shiftStatus,
