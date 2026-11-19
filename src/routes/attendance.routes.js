@@ -233,6 +233,19 @@ function createAttendanceRouter(prisma) {
           }
         : null;
 
+      // Check if user has an active/pending/approved outwork request today
+      const todayStartUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 0, 0, 0, 0));
+      const todayEndUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 23, 59, 59, 999));
+      const activeOutwork = await prisma.outworkRequest.findFirst({
+        where: {
+          userId: req.user.userId,
+          organizationId: req.user.organizationId,
+          visitDate: { gte: todayStartUtc, lte: todayEndUtc },
+          status: { in: ["PENDING", "APPROVED"] },
+        },
+        select: { id: true, destination: true, purpose: true, status: true },
+      });
+
       if (!attendance) {
         return res.status(200).json({
           checkedIn: false,
@@ -240,6 +253,7 @@ function createAttendanceRouter(prisma) {
           attendance: null,
           isExempt,
           rosterDetails,
+          activeOutwork: activeOutwork || null,
         });
       }
 
@@ -248,6 +262,9 @@ function createAttendanceRouter(prisma) {
         checkedOut: attendance.currentState === "CHECKED_OUT",
         attendance,
         isExempt,
+        rosterDetails,
+        activeOutwork: activeOutwork || null,
+      });
         rosterDetails,
       });
     } catch (err) {
@@ -466,9 +483,39 @@ function createAttendanceRouter(prisma) {
   );
 
   // POST /api/attendance/check-out
+  // Supports regular office QR checkout AND outside Outwork checkout!
   router.post(
     "/check-out",
-    (req, res, next) => officeIpGuard(prisma, req, res, next),
+    async (req, res, next) => {
+      // Check if user has an active outwork request today or attendance was via outwork
+      const today = await getOrganizationAttendanceDate(req.user.organizationId);
+      const todayStartUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 0, 0, 0, 0));
+      const todayEndUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 23, 59, 59, 999));
+
+      const hasOutwork = await prisma.outworkRequest.findFirst({
+        where: {
+          userId: req.user.userId,
+          organizationId: req.user.organizationId,
+          visitDate: { gte: todayStartUtc, lte: todayEndUtc },
+          status: { in: ["PENDING", "APPROVED"] },
+        },
+        select: { id: true, destination: true },
+      });
+
+      const currentAtt = await prisma.attendance.findUnique({
+        where: { userId_date: { userId: req.user.userId, date: today } },
+        select: { punchInDeviceType: true },
+      });
+
+      // If user has outwork today or checked in via OUTWORK, bypass office IP restriction!
+      if (hasOutwork || currentAtt?.punchInDeviceType === "OUTWORK" || req.body?.isOutworkCheckOut) {
+        req.isOutworkAllowed = true;
+        return next();
+      }
+
+      // Otherwise enforce normal office Wi-Fi check
+      return officeIpGuard(prisma, req, res, next);
+    },
     async (req, res, next) => {
       try {
         const dto = req.body || {};
@@ -477,34 +524,39 @@ function createAttendanceRouter(prisma) {
 
         let isQrValid = false;
 
-        // 1. Check if it's the static office token
-        if (incomingSecret && incomingSecret === validStaticSecret) {
+        // If outwork checkout is allowed, QR code is NOT mandatory
+        if (req.isOutworkAllowed || dto.isOutworkCheckOut) {
           isQrValid = true;
-        }
+        } else {
+          // 1. Check if it's the static office token
+          if (incomingSecret && incomingSecret === validStaticSecret) {
+            isQrValid = true;
+          }
 
-        // 2. Check if it's a dynamic JSON tenant QR code
-        if (!isQrValid && incomingSecret) {
-          try {
-            const parsed = JSON.parse(incomingSecret);
-            if (parsed && parsed.type === "OFFICE_ATTENDANCE_QR") {
-              if (parsed.orgId && parsed.orgId === req.user.organizationId) {
-                const secret = process.env.JWT_SECRET || "hrms_secret";
-                const rawData = `tenant:${parsed.orgId}:slug:${parsed.slug || ""}:ip:${parsed.officeIp || "any"}`;
-                const expectedSig = crypto.createHmac("sha256", secret).update(rawData).digest("hex");
-                if (expectedSig === parsed.sig) {
-                  isQrValid = true;
+          // 2. Check if it's a dynamic JSON tenant QR code
+          if (!isQrValid && incomingSecret) {
+            try {
+              const parsed = JSON.parse(incomingSecret);
+              if (parsed && parsed.type === "OFFICE_ATTENDANCE_QR") {
+                if (parsed.orgId && parsed.orgId === req.user.organizationId) {
+                  const secret = process.env.JWT_SECRET || "hrms_secret";
+                  const rawData = `tenant:${parsed.orgId}:slug:${parsed.slug || ""}:ip:${parsed.officeIp || "any"}`;
+                  const expectedSig = crypto.createHmac("sha256", secret).update(rawData).digest("hex");
+                  if (expectedSig === parsed.sig) {
+                    isQrValid = true;
+                  }
                 }
               }
+            } catch {
+              // Not a JSON string
             }
-          } catch {
-            // Not a JSON string
           }
-        }
 
-        if (!isQrValid) {
-          return res.status(403).json({
-            message: "Invalid or missing office QR code. Please scan the official Office QR code to clock out.",
-          });
+          if (!isQrValid) {
+            return res.status(403).json({
+              message: "Invalid or missing office QR code. Please scan the official Office QR code to clock out.",
+            });
+          }
         }
 
         const today = await getOrganizationAttendanceDate(req.user.organizationId);
@@ -540,6 +592,8 @@ function createAttendanceRouter(prisma) {
             totalWorkMinutes
           );
 
+          const punchOutAddress = dto.address || (req.isOutworkAllowed ? "Outwork Remote Checkout" : null);
+
           return tx.attendance.update({
             where: { id: attendance.id },
             data: {
@@ -549,7 +603,7 @@ function createAttendanceRouter(prisma) {
               overtimeMinutes,
               punchOutLatitude: dto.latitude || null,
               punchOutLongitude: dto.longitude || null,
-              punchOutAddress: dto.address || null,
+              punchOutAddress,
             },
             include: {
               breaks: { orderBy: { startTime: "desc" } },
