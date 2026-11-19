@@ -265,8 +265,6 @@ function createAttendanceRouter(prisma) {
         rosterDetails,
         activeOutwork: activeOutwork || null,
       });
-        rosterDetails,
-      });
     } catch (err) {
       next(err);
     }
